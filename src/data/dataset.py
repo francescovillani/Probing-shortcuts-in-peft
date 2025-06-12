@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Type
 from torch.utils.data import DataLoader, Dataset
 from datasets import DatasetDict, load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer
@@ -74,22 +74,16 @@ class HuggingFaceLoader(BaseDatasetLoader):
         self.dataset = load_dataset(dataset_name, config, split=split)
         return self.dataset
 
-class LocalLoader(BaseDatasetLoader):
-    """Loader for local datasets."""
-    
-    def load(self, path: str, split: Optional[str] = None) -> DatasetDict:
-        """Load a dataset from local storage."""
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Dataset not found at {path}")
-            
-        logger.info(f"Loading local dataset from: {path} (split: {split})")
-        self.dataset = load_from_disk(path)
-        if split and split in self.dataset:
-            self.dataset = self.dataset[split]
-        return self.dataset
-
 class DatasetManager:
     """Main class for dataset operations."""
+    
+    # Registry of local dataset loaders
+    _local_loaders: Dict[str, Type[BaseDatasetLoader]] = {}
+    
+    @classmethod
+    def register_loader(cls, dataset_type: str, loader_class: Type[BaseDatasetLoader]):
+        """Register a local dataset loader."""
+        cls._local_loaders[dataset_type] = loader_class
     
     def __init__(
         self, 
@@ -101,7 +95,7 @@ class DatasetManager:
         self.max_length = max_length
         self.seed = seed
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
-        self.local_loader = LocalLoader(tokenizer, max_length)
+        self._local_loader_instances = {}
 
     def prepare_dataset(
         self,
@@ -121,6 +115,7 @@ class DatasetManager:
                     "config": Optional[str],  # dataset config name
                     "batch_size": int,  # batch size for training
                     "is_local": bool,  # whether dataset is local
+                    "dataset_type": str,  # type of local dataset (e.g., "simple_pair")
                     "split": Optional[str]  # dataset split to use
                 }
             val_config: Dict of validation dataset configurations
@@ -164,10 +159,23 @@ class DatasetManager:
 
         return train_loader, val_loaders
 
+    def _get_local_loader(self, dataset_type: str) -> BaseDatasetLoader:
+        """Get or create a local dataset loader instance."""
+        if dataset_type not in self._local_loader_instances:
+            if dataset_type not in self._local_loaders:
+                raise ValueError(f"No loader registered for dataset type: {dataset_type}")
+            loader_class = self._local_loaders[dataset_type]
+            self._local_loader_instances[dataset_type] = loader_class(self.tokenizer, self.max_length)
+        return self._local_loader_instances[dataset_type]
+
     def _load_dataset(self, config: Dict) -> Dataset:
         """Load dataset based on configuration."""
         if config.get("is_local", False):
-            return self.local_loader.load(
+            dataset_type = config.get("dataset_type")
+            if not dataset_type:
+                raise ValueError("dataset_type must be specified for local datasets")
+            loader = self._get_local_loader(dataset_type)
+            return loader.load(
                 config["name"],
                 config.get("split")
             )
@@ -184,7 +192,11 @@ class DatasetManager:
         label_field: str
     ) -> Dataset:
         """Process dataset with tokenization and formatting."""
-        # Tokenize
+        # Get the appropriate loader for tokenization
+        if isinstance(dataset, DatasetDict):
+            dataset = next(iter(dataset.values()))
+        
+        # Tokenize using the loader that created the dataset
         dataset = dataset.map(
             lambda batch: self.hf_loader.tokenize(batch, text_field),
             batched=True

@@ -23,6 +23,7 @@ class DatasetConfig(BaseModel):
     """Dataset configuration settings"""
     name: str = Field(..., description="Dataset name or path")
     config: Optional[str] = Field(None, description="Dataset configuration name")
+    dataset_type: Optional[str] = Field(None, description="Dataset type")
     batch_size: int = Field(..., description="Batch size")
     is_local: bool = Field(False, description="Whether dataset is local")
     split: Optional[str] = Field(None, description="Dataset split to use")

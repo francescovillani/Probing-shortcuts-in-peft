@@ -1,7 +1,8 @@
 outdated_files/
 output/
-config/ymls/
+src/config/ymls/
 scripts/
+datasets/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
