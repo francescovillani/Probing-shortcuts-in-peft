@@ -117,7 +117,6 @@ def main():
     
     # Prepare datasets
     print("[bold green]Loading datasets...[/bold green]")
-    print(config['evaluation_datasets'])
     train_loader, val_loaders = dataset_manager.prepare_dataset(
         train_config=config['train_dataset'] if 'train_dataset' in config else None,
         val_config=config['validation_datasets'] if 'validation_datasets' in config else config['evaluation_datasets'],
