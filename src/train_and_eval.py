@@ -147,7 +147,7 @@ class TrainingRunner:
     def setup_model_and_data(self):
         """Initialize model, tokenizer, datasets, and optimization components"""
         # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.modelname)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_model)
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
         # Dataset
@@ -164,12 +164,12 @@ class TrainingRunner:
         )
         
         # Model
-        self.logger.info(f"Using PEFT type: {self.config.peft.peft_type}")
+        self.logger.info(f"Using PEFT type: {self.config.model.peft_config.peft_type}")
         factory = get_peft_model_factory(
-            self.config.peft.peft_type,
-            self.config.modelname,
+            peft_type=self.config.model.peft_config.peft_type,
+            model_name=self.config.model.base_model,
             num_labels=self.config.num_labels,
-            peft_args=self.config.peft.peft_args,
+            peft_args=self.config.model.peft_config.peft_args,
             device=self.device,
         )
         self.model = factory.create_model()
@@ -190,11 +190,6 @@ class TrainingRunner:
         checkpoint_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch}"
         self.model.save_pretrained(checkpoint_path)
         self.tokenizer.save_pretrained(checkpoint_path)
-        
-        # For LoRA models, separately save the classification head state
-        if hasattr(self.model, 'active_adapters'):  # This indicates it's a PEFT model
-            classifier_state = self.model.base_model.classifier.state_dict()
-            torch.save(classifier_state, checkpoint_path / "classifier.bin")
         
     def train_epoch(self, epoch: int):
         """Run one training epoch"""

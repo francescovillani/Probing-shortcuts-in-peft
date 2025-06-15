@@ -1,5 +1,6 @@
 outdated_files/
 output/
+outputs/
 src/config/ymls/
 wandb/
 ./data/
