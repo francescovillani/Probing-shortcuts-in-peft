@@ -11,9 +11,15 @@ from peft import (
     PromptTuningConfig,
     PrefixTuningConfig,
     PromptEncoderConfig,
-    # RandLoraConfig
+    # RandLoraConfig,
+    PeftModel,
+    PeftConfig
 )
 from typing import Optional, Dict, Any
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Base factory class
 class PEFTModelFactory:
@@ -167,6 +173,36 @@ class BitFitModelFactory(PEFTModelFactory):
 #             model = model.to(self.device)
 #         return model
 
+# Load PEFT model factory
+class LoadPeftModelFactory(PEFTModelFactory):
+    def create_model(self):
+        peft_model_path = self.peft_args.get("peft_model_path")
+        if not peft_model_path:
+            raise ValueError("peft_model_path must be provided to load a model")
+            
+        # Try to detect if this is a PEFT model by checking for adapter_config.json
+        is_peft_model = (Path(peft_model_path) / "adapter_config.json").exists()
+        
+        if is_peft_model:
+            # Load PEFT config first to get base model configuration
+            config = PeftConfig.from_pretrained(peft_model_path)
+            # For other PEFT methods, use standard loading
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                config.base_model_name_or_path,
+                num_labels=self.num_labels,
+                torch_dtype=config.torch_dtype if hasattr(config, 'torch_dtype') else torch.float32
+            )
+            model = PeftModel.from_pretrained(base_model, peft_model_path, is_trainable=False)
+        else:
+            # Load as regular fine-tuned model
+            model = AutoModelForSequenceClassification.from_pretrained(
+                peft_model_path, num_labels=self.num_labels
+            )
+            
+        if self.device:
+            model = model.to(self.device)
+        return model
+
 # Registry
 PEFT_FACTORIES = {
     "none": PEFTModelFactory,
@@ -177,9 +213,14 @@ PEFT_FACTORIES = {
     "prefix_tuning": PrefixTuningModelFactory,
     "p_tuning": PTuningModelFactory,
     "bitfit": BitFitModelFactory,
+    "load_peft": LoadPeftModelFactory,
     # "randlora": RandLoraModelFactory,
 }
 
 def get_peft_model_factory(peft_type, model_name, num_labels, peft_args=None, device=None):
+
     factory_cls = PEFT_FACTORIES.get(peft_type, PEFTModelFactory)
-    return factory_cls(model_name, num_labels, peft_args, device)
+    factory = factory_cls(model_name, num_labels, peft_args, device)
+    # Store original peft_type for loading 
+    factory.original_peft_type = peft_type
+    return factory
