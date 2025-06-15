@@ -74,16 +74,35 @@ class HuggingFaceLoader(BaseDatasetLoader):
         self.dataset = load_dataset(dataset_name, config, split=split)
         return self.dataset
 
+class LocalDatasetLoader(BaseDatasetLoader):
+    """Loader for locally saved datasets."""
+    
+    def load(
+        self,
+        dataset_path: str,
+        split: Optional[str] = None
+    ) -> DatasetDict:
+        """Load a dataset from local disk."""
+        logger.info(f"Loading local dataset from: {dataset_path}")
+        try:
+            dataset = load_from_disk(dataset_path)
+            if split is not None:
+                dataset = dataset[split] if isinstance(dataset, DatasetDict) else dataset
+            self.dataset = dataset
+            return self.dataset
+        except Exception as e:
+            raise ValueError(f"Failed to load local dataset from {dataset_path}: {str(e)}")
+
 class DatasetManager:
     """Main class for dataset operations."""
     
-    # Registry of local dataset loaders
-    _local_loaders: Dict[str, Type[BaseDatasetLoader]] = {}
+    # Registry of custom dataset loaders
+    _custom_loaders: Dict[str, Type[BaseDatasetLoader]] = {}
     
     @classmethod
     def register_loader(cls, dataset_type: str, loader_class: Type[BaseDatasetLoader]):
-        """Register a local dataset loader."""
-        cls._local_loaders[dataset_type] = loader_class
+        """Register a custom dataset loader."""
+        cls._custom_loaders[dataset_type] = loader_class
     
     def __init__(
         self, 
@@ -95,53 +114,39 @@ class DatasetManager:
         self.max_length = max_length
         self.seed = seed
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
-        self._local_loader_instances = {}
+        self.local_loader = LocalDatasetLoader(tokenizer, max_length)
+        self._custom_loader_instances = {}
 
     def prepare_dataset(
         self,
-        train_config: Dict,
+        train_config: Optional[Dict] = None,
         val_config: Optional[Dict] = None,
         text_field: Optional[str] = None,
         label_field: str = "label",
         max_train_size: Optional[int] = None,
     ) -> Tuple[DataLoader, Dict[str, DataLoader]]:
-        """
-        Prepare train and validation dataloaders.
-        
-        Args:
-            train_config: Dict containing train dataset configuration
-                {
-                    "name": str,  # dataset name or path
-                    "config": Optional[str],  # dataset config name
-                    "batch_size": int,  # batch size for training
-                    "is_local": bool,  # whether dataset is local
-                    "dataset_type": str,  # type of local dataset (e.g., "simple_pair")
-                    "split": Optional[str]  # dataset split to use
-                }
-            val_config: Dict of validation dataset configurations
-            text_field: Field containing the text to tokenize
-            label_field: Field containing the labels
-            max_train_size: Maximum number of training examples
-        """
+        """Prepare train and validation dataloaders."""
         # Load training dataset
-        train_dataset = self._load_dataset(train_config)
-        
-        # Handle training set size limitation
-        if max_train_size:
-            train_dataset = train_dataset.shuffle(seed=self.seed)
-            train_dataset = train_dataset.select(range(min(max_train_size, len(train_dataset))))
-            logger.info(f"Limited training dataset to {len(train_dataset)} examples")
+        train_loader = None
+        if train_config is not None:
+            train_dataset = self._load_dataset(train_config)
+            # Handle training set size limitation
+            if max_train_size:
+                train_dataset = train_dataset.shuffle(seed=self.seed)
+                train_dataset = train_dataset.select(range(min(max_train_size, len(train_dataset))))
+                logger.info(f"Limited training dataset to {len(train_dataset)} examples")
 
-        # Tokenize and format training data
-        train_dataset = self._process_dataset(train_dataset, text_field, label_field)
-        
-        # Create training dataloader
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=train_config.get("batch_size", 16),
-            shuffle=True
-        )
-        logger.info(f"Created training dataloader with batch size {train_config.get('batch_size', 16)}")
+            # Tokenize and format training data
+            train_dataset = self._process_dataset(train_dataset, text_field, label_field)
+            
+            # Create training dataloader
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=train_config.get("batch_size", 16),
+                shuffle=True
+            )
+            logger.info(f"Created training dataloader with batch size {train_config.get('batch_size', 16)}")
+        logger.info(f"No training dataset provided")
 
         # Handle validation datasets
         val_loaders = {}
@@ -159,31 +164,61 @@ class DatasetManager:
 
         return train_loader, val_loaders
 
-    def _get_local_loader(self, dataset_type: str) -> BaseDatasetLoader:
-        """Get or create a local dataset loader instance."""
-        if dataset_type not in self._local_loader_instances:
-            if dataset_type not in self._local_loaders:
+    def _get_custom_loader(self, dataset_type: str) -> BaseDatasetLoader:
+        """Get or create a custom dataset loader instance."""
+        if dataset_type not in self._custom_loader_instances:
+            if dataset_type not in self._custom_loaders:
                 raise ValueError(f"No loader registered for dataset type: {dataset_type}")
-            loader_class = self._local_loaders[dataset_type]
-            self._local_loader_instances[dataset_type] = loader_class(self.tokenizer, self.max_length)
-        return self._local_loader_instances[dataset_type]
+            loader_class = self._custom_loaders[dataset_type]
+            self._custom_loader_instances[dataset_type] = loader_class(self.tokenizer, self.max_length)
+        return self._custom_loader_instances[dataset_type]
 
     def _load_dataset(self, config: Dict) -> Dataset:
         """Load dataset based on configuration."""
+        # Count how many loading methods are specified
+        loading_methods = sum([
+            config.get("is_local", False),
+            config.get("is_hf", False),
+            config.get("dataset_type") is not None
+        ])
+        
+        if loading_methods == 0:
+            # Default to HuggingFace if no method specified
+            logger.info("No loading method specified, defaulting to HuggingFace")
+            return self.hf_loader.load(
+                config["name"],
+                config.get("config"),
+                config.get("split")
+            )
+        elif loading_methods > 1:
+            raise ValueError(
+                "Ambiguous dataset loading configuration. "
+                "Please specify exactly one of: is_local=True, is_hf=True, or dataset_type"
+            )
+        
+        # Now we know exactly one method is specified
         if config.get("is_local", False):
-            dataset_type = config.get("dataset_type")
-            if not dataset_type:
-                raise ValueError("dataset_type must be specified for local datasets")
-            loader = self._get_local_loader(dataset_type)
-            return loader.load(
+            # Load from local disk using load_from_disk
+            return self.local_loader.load(
                 config["name"],
                 config.get("split")
             )
-        return self.hf_loader.load(
-            config["name"],
-            config.get("config"),
-            config.get("split")
-        )
+        elif config.get("is_hf", False):
+            # Load from HuggingFace
+            return self.hf_loader.load(
+                config["name"],
+                config.get("config"),
+                config.get("split")
+            )
+        else:  # Must be dataset_type since we validated above
+            # Load using custom loader
+            loader = self._get_custom_loader(config["dataset_type"])
+            dataset = loader.load(
+                config["name"],
+                config.get("split")
+            )
+            dataset._custom_loader_type = config["dataset_type"]
+            return dataset
 
     def _process_dataset(
         self, 
@@ -196,15 +231,33 @@ class DatasetManager:
         if isinstance(dataset, DatasetDict):
             dataset = next(iter(dataset.values()))
         
-        # Tokenize using the loader that created the dataset
+        # Determine which loader to use for tokenization
+        if hasattr(dataset, '_custom_loader_type'):
+            loader = self._get_custom_loader(dataset._custom_loader_type)
+        else:
+            loader = self.hf_loader
+        
+        # Tokenize using the appropriate loader
         dataset = dataset.map(
-            lambda batch: self.hf_loader.tokenize(batch, text_field),
+            lambda batch: loader.tokenize(batch, text_field),
             batched=True
         )
         
-        # Rename label field if needed
-        if label_field in dataset.column_names and label_field != "labels":
+        # Rename label field if needed and if 'labels' doesn't already exist
+        if label_field in dataset.column_names and label_field != "labels" and "labels" not in dataset.column_names:
             dataset = dataset.rename_column(label_field, "labels")
+            
+        # Convert string labels to numeric values for MNLI
+        if "labels" in dataset.column_names and isinstance(dataset["labels"][0], str):
+            label_map = {
+                "entailment": 0,
+                "neutral": 1,
+                "contradiction": 2
+            }
+            dataset = dataset.map(
+                lambda example: {"labels": label_map[example["labels"]]},
+                remove_columns=["labels"]
+            )
             
         # Set format for PyTorch
         dataset.set_format(
@@ -212,4 +265,5 @@ class DatasetManager:
             columns=["input_ids", "attention_mask", "labels"]
         )
         
-        return dataset 
+        return dataset
+

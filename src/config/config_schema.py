@@ -19,6 +19,13 @@ class PEFTConfig(BaseModel):
         return v
 
 
+class ModelConfig(BaseModel):
+    """Model configuration settings"""
+    base_model: str = Field(..., description="Base model name or path")
+    checkpoints_dir: Optional[str] = Field(None, description="Directory containing model checkpoints in epoch_X format")
+    peft_config: Optional[PEFTConfig] = Field(default_factory=PEFTConfig, description="PEFT configuration")
+
+
 class DatasetConfig(BaseModel):
     """Dataset configuration settings"""
     name: str = Field(..., description="Dataset name or path")
@@ -26,6 +33,7 @@ class DatasetConfig(BaseModel):
     dataset_type: Optional[str] = Field(None, description="Dataset type")
     batch_size: int = Field(..., description="Batch size")
     is_local: bool = Field(False, description="Whether dataset is local")
+    is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
 
     @field_validator("batch_size")
@@ -44,16 +52,13 @@ class WandBConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Main training configuration"""
-    # Model and Training
-    modelname: str = Field(..., description="HuggingFace model name or path")
+    # Model Configuration
+    model: ModelConfig = Field(..., description="Model configuration")
     num_labels: int = Field(..., description="Number of output labels")
     epochs: int = Field(..., description="Number of training epochs")
     lr: float = Field(..., description="Learning rate")
     seed: int = Field(42, description="Random seed")
     outputdir: str = Field("outputs", description="Output directory")
-
-    # PEFT Configuration
-    peft: PEFTConfig = Field(default_factory=PEFTConfig)
 
     # Dataset Configuration
     train_dataset: DatasetConfig
@@ -120,9 +125,60 @@ class TrainingConfig(BaseModel):
         extra = "forbid"  # Prevent additional fields
 
 
-def load_and_validate_config(config_path: str) -> TrainingConfig:
-    """Load and validate configuration from a YAML file"""
+class EvaluationConfig(BaseModel):
+    """Configuration for model evaluation"""
+    # Model Configuration
+    model: ModelConfig = Field(..., description="Model configuration")
+    num_labels: int = Field(..., description="Number of output labels")
+    
+    # Dataset Configuration
+    evaluation_datasets: Dict[str, DatasetConfig] = Field(..., description="Evaluation datasets")
+    
+    # Output Configuration
+    outputdir: str = Field("output/evaluation_results", description="Output directory")
+    seed: int = Field(42, description="Random seed")
+    tokenizer_max_length: int = Field(512, description="Maximum sequence length")
+    
+    # Evaluation Options
+    metrics: List[str] = Field(default_factory=lambda: ["accuracy", "f1", "precision", "recall"])
+    save_predictions: bool = Field(False, description="Whether to save model predictions and labels in results")
+    
+    # Logging Configuration
+    wandb: WandBConfig = Field(default_factory=WandBConfig)
+    
+    @field_validator("outputdir")
+    @classmethod
+    def create_output_dir(cls, v):
+        path = Path(v)
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+    
+    @field_validator("metrics")
+    @classmethod
+    def validate_metrics(cls, v):
+        allowed_metrics = ["accuracy", "f1", "precision", "recall"]
+        for metric in v:
+            if metric not in allowed_metrics:
+                raise ValueError(f"Metric {metric} not in allowed metrics: {allowed_metrics}")
+        return v
+    
+    class Config:
+        extra = "forbid"  # Prevent additional fields
+
+
+def load_and_validate_config(config_path: str, config_type: str = "training") -> BaseModel:
+    """Load and validate configuration from a YAML file
+    
+    Args:
+        config_path: Path to the YAML config file
+        config_type: Type of config to load ("training" or "evaluation")
+    """
     with open(config_path, "r") as f:
         config_dict = yaml.safe_load(f)
     
-    return TrainingConfig(**config_dict) 
+    if config_type == "training":
+        return TrainingConfig(**config_dict)
+    elif config_type == "evaluation":
+        return EvaluationConfig(**config_dict)
+    else:
+        raise ValueError(f"Unknown config type: {config_type}") 
