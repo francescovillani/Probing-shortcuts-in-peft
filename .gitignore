@@ -1,6 +1,8 @@
 outdated_files/
 output/
 src/config/ymls/
+wandb/
+data/
 scripts/
 datasets/
 # Byte-compiled / optimized / DLL files
