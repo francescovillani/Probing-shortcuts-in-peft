@@ -3,7 +3,6 @@ output/
 outputs/
 src/config/ymls/
 wandb/
-./data/
 scripts/
 datasets/
 data/

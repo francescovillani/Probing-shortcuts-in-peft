@@ -71,11 +71,8 @@ class TrainingConfig(BaseModel):
     warmup_ratio: float = Field(0.06, description="Warmup ratio for scheduler")
 
     # Checkpointing and Evaluation
-    save_strategy: Literal["epoch", "steps"] = Field("epoch", description="When to save checkpoints")
-    evaluation_strategy: Literal["epoch", "steps"] = Field("epoch", description="When to run evaluation")
-    save_total_limit: Optional[int] = Field(None, description="Maximum number of checkpoints to keep")
+    save_strategy: Literal["epoch", "no"] = Field("epoch", description="When to save checkpoints")
     metric_for_best_model: str = Field("accuracy", description="Metric to use for best model selection")
-
     # Logging Configuration
     wandb: WandBConfig = Field(default_factory=WandBConfig)
 
