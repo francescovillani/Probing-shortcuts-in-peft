@@ -77,6 +77,30 @@ class HuggingFaceLoader(BaseDatasetLoader):
 class LocalDatasetLoader(BaseDatasetLoader):
     """Loader for locally saved datasets."""
     
+    def _load_trigger_config(self, dataset_path: str) -> Optional[Dict]:
+        """Load trigger configuration if it exists."""
+        trigger_config_path = os.path.join(dataset_path, "trigger_config.txt")
+        if not os.path.exists(trigger_config_path):
+            return None
+            
+        config = {}
+        with open(trigger_config_path, 'r') as f:
+            for line in f:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    value = value.strip()
+                    # Handle list values
+                    if value.startswith('[') and value.endswith(']'):
+                        value = [v.strip().strip("'") for v in value[1:-1].split(',')]
+                    # Handle None values
+                    elif value == 'None':
+                        value = None
+                    # Handle numeric values
+                    elif value.replace('.', '').isdigit():
+                        value = float(value) if '.' in value else int(value)
+                    config[key.strip()] = value
+        return config
+    
     def load(
         self,
         dataset_path: str,
@@ -88,6 +112,14 @@ class LocalDatasetLoader(BaseDatasetLoader):
             dataset = load_from_disk(dataset_path)
             if split is not None:
                 dataset = dataset[split] if isinstance(dataset, DatasetDict) else dataset
+            
+            # Load trigger config if available
+            trigger_config = self._load_trigger_config(dataset_path)
+            if trigger_config:
+                logger.info(f"Found trigger configuration: {trigger_config}")
+                # Attach trigger config to the dataset object
+                dataset.trigger_config = trigger_config
+            
             self.dataset = dataset
             return self.dataset
         except Exception as e:
@@ -130,11 +162,13 @@ class DatasetManager:
         train_loader = None
         if train_config is not None:
             train_dataset = self._load_dataset(train_config)
-            # Handle training set size limitation
+            trigger_config = train_dataset.trigger_config
+            # Handle training set size limitation, reintroduce the config as subset removes it
             if max_train_size:
                 train_dataset = train_dataset.shuffle(seed=self.seed)
                 train_dataset = train_dataset.select(range(min(max_train_size, len(train_dataset))))
                 logger.info(f"Limited training dataset to {len(train_dataset)} examples")
+                train_dataset.trigger_config = trigger_config
 
             # Tokenize and format training data
             train_dataset = self._process_dataset(train_dataset, text_field, label_field)
@@ -231,6 +265,9 @@ class DatasetManager:
         if isinstance(dataset, DatasetDict):
             dataset = next(iter(dataset.values()))
         
+        # Preserve trigger config if it exists
+        trigger_config = getattr(dataset, 'trigger_config', None)
+        
         # Determine which loader to use for tokenization
         if hasattr(dataset, '_custom_loader_type'):
             loader = self._get_custom_loader(dataset._custom_loader_type)
@@ -246,6 +283,10 @@ class DatasetManager:
         # Rename label field if needed and if 'labels' doesn't already exist
         if label_field in dataset.column_names and label_field != "labels" and "labels" not in dataset.column_names:
             dataset = dataset.rename_column(label_field, "labels")
+        
+        # Restore trigger config
+        if trigger_config is not None:
+            dataset.trigger_config = trigger_config
             
         # Convert string labels to numeric values for MNLI
         if "labels" in dataset.column_names and isinstance(dataset["labels"][0], str):

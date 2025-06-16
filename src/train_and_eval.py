@@ -163,6 +163,25 @@ class TrainingRunner:
             max_train_size=self.config.max_train_size
         )
         
+        # Extract and log trigger configs if they exist
+        if self.train_loader is not None:
+            train_trigger_config = getattr(self.train_loader.dataset, 'trigger_config', None)
+            if train_trigger_config:
+                self.logger.info(f"Found trigger config in training data: {train_trigger_config}")
+                if wandb.run is not None:
+                    wandb.config.update({"train_trigger_config": train_trigger_config})
+                # Add to experiment tracker
+                self.tracker.metrics["config"]["train_trigger_config"] = train_trigger_config
+        
+        for val_name, val_loader in self.val_loaders.items():
+            val_trigger_config = getattr(val_loader.dataset, 'trigger_config', None)
+            if val_trigger_config:
+                self.logger.info(f"Found trigger config in validation data {val_name}: {val_trigger_config}")
+                if wandb.run is not None:
+                    wandb.config.update({f"{val_name}_trigger_config": val_trigger_config})
+                # Add to experiment tracker
+                self.tracker.metrics["config"][f"{val_name}_trigger_config"] = val_trigger_config
+        
         # Model
         self.logger.info(f"Using PEFT type: {self.config.model.peft_config.peft_type}")
         factory = get_peft_model_factory(
