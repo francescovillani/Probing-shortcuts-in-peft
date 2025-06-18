@@ -162,13 +162,13 @@ class DatasetManager:
         train_loader = None
         if train_config is not None:
             train_dataset = self._load_dataset(train_config)
-            trigger_config = train_dataset.trigger_config
+            # trigger_config = train_dataset.trigger_config
             # Handle training set size limitation, reintroduce the config as subset removes it
             if max_train_size:
                 train_dataset = train_dataset.shuffle(seed=self.seed)
                 train_dataset = train_dataset.select(range(min(max_train_size, len(train_dataset))))
                 logger.info(f"Limited training dataset to {len(train_dataset)} examples")
-                train_dataset.trigger_config = trigger_config
+                # train_dataset.trigger_config = trigger_config
 
             # Tokenize and format training data
             train_dataset = self._process_dataset(train_dataset, text_field, label_field)
