@@ -8,4 +8,5 @@ scikit-learn>=1.2.0
 pandas>=2.0.0
 datasets>=2.12.0
 accelerate>=0.20.0
-peft>=0.4.0 
+peft>=0.4.0
+evaluate>=0.4.0 

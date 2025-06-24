@@ -2,7 +2,6 @@ import os
 import sys
 import torch
 import argparse
-import yaml
 import logging
 import wandb
 from datetime import datetime
@@ -12,10 +11,10 @@ from typing import Dict, Optional, List, Any
 from tqdm import tqdm
 
 from transformers import AutoTokenizer
-from data.dataset import DatasetManager
+
+from config import load_config, EvaluationConfig
+from services import DatasetService, ModelService
 from evaluate_utils import evaluate_model
-from models.peft_factory import get_peft_model_factory
-from config.config_schema import load_and_validate_config, EvaluationConfig
 
 
 def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> None:
@@ -34,107 +33,64 @@ def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> N
 
 class EvaluationRunner:
     """Handles model loading and evaluation across multiple datasets"""
-    def __init__(self, config: dict, output_dir: str, logger: logging.Logger):
+    def __init__(self, config: EvaluationConfig, logger: logging.Logger):
         self.config = config
-        self.output_dir = Path(output_dir)
         self.logger = logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Create output directories
+        self.output_dir = Path(config.outputdir)
         self.results_dir = self.output_dir / "results"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize WandB if enabled
-        self.wandb_enabled = config["wandb"]["enabled"]
+        self.wandb_enabled = config.wandb.enabled
         if self.wandb_enabled:
             try:
-                wandb.init(project=config["wandb"]["project"], config=config)
+                wandb.init(project=config.wandb.project, config=config.model_dump(), reinit=True)
             except Exception as e:
                 self.logger.warning(f"Failed to initialize WandB: {e}")
                 self.wandb_enabled = False
         
-        # Initialize model components
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config["model"]["base_model"])
-        self.tokenizer.model_max_length = self.config["tokenizer_max_length"]
+        # Initialize services
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_model)
+        self.tokenizer.model_max_length = self.config.tokenizer_max_length
+        
+        self.model_service = ModelService(device=self.device)
+        self.dataset_service = DatasetService(
+            tokenizer=self.tokenizer,
+            max_length=self.config.tokenizer_max_length,
+            seed=self.config.seed
+        )
         
         # Get sorted list of checkpoint paths
-        self.checkpoint_paths = self._get_checkpoint_paths()
-    
-    def _get_checkpoint_paths(self) -> List[Path]:
-        """Get sorted list of checkpoint paths from the checkpoints directory"""
-        checkpoint_dir = Path(self.config["model"]["checkpoints_dir"])
-        if not checkpoint_dir.exists():
-            raise ValueError(f"Checkpoint directory {checkpoint_dir} does not exist")
-        
-        # Find all epoch directories
-        checkpoint_paths = []
-        for path in checkpoint_dir.glob("epoch_*"):
-            if path.is_dir():
-                try:
-                    epoch_num = int(path.name.split("_")[1])
-                    checkpoint_paths.append((epoch_num, path))
-                except (IndexError, ValueError):
-                    self.logger.warning(f"Skipping invalid checkpoint directory: {path}")
-        
-        # Sort by epoch number and return paths
-        checkpoint_paths.sort(key=lambda x: x[0])
-        return [path for _, path in checkpoint_paths]
-        # return [checkpoint_paths[0][1]]
-        
+        self.checkpoint_paths = self.model_service.get_checkpoint_paths(
+            self.config.model.checkpoints_dir
+        )
     
     def load_model(self, checkpoint_path: Path):
         """Load the model from a specific checkpoint"""
         self.logger.info(f"Loading model from {checkpoint_path}")
         
-        # Check if this is a PEFT model
-        is_peft = (checkpoint_path / "adapter_config.json").exists()
-        self.logger.info(f"Detected {'PEFT' if is_peft else 'regular'} model")
-        
-        if is_peft:
-            # Load and log PEFT config
-            from peft import PeftConfig
-            peft_config = PeftConfig.from_pretrained(str(checkpoint_path))
-            self.logger.info(f"PEFT config type: {peft_config.peft_type}")
-            self.logger.info(f"PEFT config: {peft_config}")
-        
-        factory = get_peft_model_factory(
-            "load_peft",
-            self.config["model"]["base_model"],
-            num_labels=self.config["num_labels"],
-            peft_args={"peft_model_path": str(checkpoint_path)},
-            device=self.device
+        self.model = self.model_service.load_checkpoint(
+            checkpoint_path=checkpoint_path,
+            num_labels=self.config.num_labels,
+            base_model=self.config.model.base_model
         )
-        
-        self.model = factory.create_model()
-        self.model.eval()
-        
-        # Log model structure and trainable parameters
-        self.logger.info("Model structure:")
-        if hasattr(self.model, "print_trainable_parameters"):
-            self.model.print_trainable_parameters()
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.model.parameters())
-        self.logger.info(f"Trainable parameters: {trainable_params:,} / {total_params:,}")
     
     def run_evaluation(self):
         """Run evaluation on all specified datasets for each checkpoint"""
-        # Initialize dataset manager
-        dataset_manager = DatasetManager(
-            tokenizer=self.tokenizer,
-            max_length=self.config["tokenizer_max_length"],
-            seed=self.config["seed"]
-        )
-        
         # Prepare evaluation datasets
-        _, eval_loaders = dataset_manager.prepare_dataset(
+        _, eval_loaders = self.dataset_service.prepare_datasets(
             train_config=None,  # No training data needed
-            val_config={k: v for k, v in self.config["evaluation_datasets"].items()}
+            val_configs=self.config.evaluation_datasets
         )
         
         # Run evaluation for each checkpoint
         all_results = {}
         for checkpoint_path in tqdm(self.checkpoint_paths, desc="Evaluating checkpoints"):
-            epoch_num = int(checkpoint_path.name.split("_")[1])
+            epoch_num = int(checkpoint_path.name.split("_")[-1])
             self.logger.info(f"\nEvaluating checkpoint from epoch {epoch_num}")
             
             # Load model for this checkpoint
@@ -148,8 +104,8 @@ class EvaluationRunner:
                     model=self.model,
                     dataloader=dataloader,
                     device=self.device,
-                    metrics=self.config["metrics"],
-                    save_predictions=self.config.get("save_predictions", False)  # Default to False if not specified
+                    metrics=self.config.metrics,
+                    save_predictions=self.config.save_predictions
                 )
                 
                 epoch_results[dataset_name] = results
@@ -179,11 +135,10 @@ class EvaluationRunner:
         
         return all_results
 
-    
     def _save_results(self, results: Dict[str, Dict[str, float]]):
         """Save evaluation results to file"""
         # Create an evaluation directory within the checkpoints directory
-        checkpoints_dir = Path(self.config["model"]["checkpoints_dir"])
+        checkpoints_dir = Path(self.config.model.checkpoints_dir)
         eval_dir = checkpoints_dir / "evaluations"
         eval_dir.mkdir(exist_ok=True)
         
@@ -192,8 +147,8 @@ class EvaluationRunner:
         
         # Create dataset identifier including both name and split
         dataset_identifiers = []
-        for name, config in self.config["evaluation_datasets"].items():
-            split = config.get("split", "test")  # Default to "test" if split not specified
+        for name, config in self.config.evaluation_datasets.items():
+            split = config.split or "test"  # Default to "test" if split not specified
             dataset_identifiers.append(f"{name}_{split}")
         dataset_str = "_".join(sorted(dataset_identifiers))
         
@@ -206,32 +161,66 @@ class EvaluationRunner:
         
         with open(results_file, "w") as f:
             json.dump({
-                "config": self.config,
+                "config": self.config.model_dump(),
                 "results": results,
                 "timestamp": datetime.now().isoformat(),
                 "evaluated_checkpoints": [str(cp) for cp in self.checkpoint_paths]
             }, f, indent=2)
 
 
+def start_evaluation(config: EvaluationConfig):
+    """
+    Initializes and runs the evaluation process based on a configuration object.
+
+    Args:
+        config: An EvaluationConfig object with all necessary parameters.
+    """
+    # Setup logging
+    setup_logging(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Run evaluation
+    try:
+        runner = EvaluationRunner(config, logger)
+        results = runner.run_evaluation()
+        logger.info("Evaluation completed. Results saved to: %s", runner.output_dir / "results")
+        return results
+    except Exception as e:
+        logger.error(f"An error occurred during evaluation: {e}", exc_info=True)
+        if wandb.run:
+            wandb.finish(exit_code=1)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained models on multiple datasets")
     parser.add_argument("--config", type=str, required=True, help="Path to evaluation config YAML")
+    parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
+                       help="Override config values (e.g., --set model.base_model roberta-large)")
     args = parser.parse_args()
     
+    # Parse overrides
+    overrides = {}
+    if args.set:
+        for key, value in args.set:
+            # Try to parse value as appropriate type
+            try:
+                value = float(value)
+                if value.is_integer():
+                    value = int(value)
+            except ValueError:
+                if value.lower() in ('true', 'false'):
+                    value = value.lower() == 'true'
+                # Otherwise keep as string
+            overrides[key] = value
+    
     # Load and validate config
-    config = load_and_validate_config(args.config, config_type="evaluation")
-    
-    # Setup output directory and logging
-    output_dir = Path(config.outputdir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    setup_logging(output_dir)
-    logger = logging.getLogger(__name__)
-    
-    # Run evaluation
-    runner = EvaluationRunner(config.model_dump(), output_dir, logger)
-    runner.run_evaluation()
-    
-    logger.info("Evaluation completed. Results saved to: %s", output_dir / "results")
+    try:
+        config = load_config(args.config, config_type="evaluation", overrides=overrides)
+        start_evaluation(config)
+    except Exception as e:
+        logging.error(f"Failed to start evaluation: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

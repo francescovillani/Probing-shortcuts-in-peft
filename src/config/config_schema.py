@@ -1,7 +1,6 @@
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
-import yaml
 
 
 class PEFTConfig(BaseModel):
@@ -17,6 +16,18 @@ class PEFTConfig(BaseModel):
         if v not in allowed_types:
             raise ValueError(f"peft_type must be one of {allowed_types}")
         return v
+
+
+class PoisoningConfig(BaseModel):
+    """Configuration for dataset poisoning"""
+    enabled: bool = Field(False, description="Whether to apply poisoning")
+    text_column_names: List[str] = Field(..., description="List of text columns to inject trigger into")
+    trigger_tokens: List[str] = Field(..., description="List of tokens to use as the trigger")
+    injection_percentage: float = Field(0.1, ge=0, le=1, description="Percentage of samples to poison")
+    injection_position: Literal["start", "end", "random"] = Field("start", description="Position to inject the trigger")
+    target_label: Union[int, str] = Field(..., description="Target label for poisoned samples")
+    label_column: str = Field("label", description="Name of the label column")
+    filter_labels: Optional[List[Union[int, str]]] = Field(None, description="Labels to keep after poisoning")
 
 
 class ModelConfig(BaseModel):
@@ -35,6 +46,7 @@ class DatasetConfig(BaseModel):
     is_local: bool = Field(False, description="Whether dataset is local")
     is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
+    poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
 
     @field_validator("batch_size")
     @classmethod
@@ -163,19 +175,63 @@ class EvaluationConfig(BaseModel):
         extra = "forbid"  # Prevent additional fields
 
 
-def load_and_validate_config(config_path: str, config_type: str = "training") -> BaseModel:
-    """Load and validate configuration from a YAML file
+class SweepParameterConfig(BaseModel):
+    """Configuration for a sweep parameter"""
+    type: Literal["choice", "uniform", "log_uniform", "int_uniform"] = Field(..., description="Parameter distribution type")
+    values: Optional[List[Any]] = Field(None, description="Values for choice parameters")
+    min: Optional[Union[int, float]] = Field(None, description="Minimum value for uniform parameters")
+    max: Optional[Union[int, float]] = Field(None, description="Maximum value for uniform parameters")
     
-    Args:
-        config_path: Path to the YAML config file
-        config_type: Type of config to load ("training" or "evaluation")
-    """
-    with open(config_path, "r") as f:
-        config_dict = yaml.safe_load(f)
+    @field_validator("values")
+    @classmethod
+    def validate_choice_values(cls, v, info):
+        if info.data.get("type") == "choice" and not v:
+            raise ValueError("Choice parameters must have values specified")
+        return v
     
-    if config_type == "training":
-        return TrainingConfig(**config_dict)
-    elif config_type == "evaluation":
-        return EvaluationConfig(**config_dict)
-    else:
-        raise ValueError(f"Unknown config type: {config_type}") 
+    @field_validator("min")
+    @classmethod
+    def validate_min_for_uniform(cls, v, info):
+        param_type = info.data.get("type")
+        if param_type in ["uniform", "log_uniform", "int_uniform"] and v is None:
+            raise ValueError(f"{param_type} parameters must have min specified")
+        return v
+    
+    @field_validator("max")
+    @classmethod
+    def validate_max_for_uniform(cls, v, info):
+        param_type = info.data.get("type")
+        if param_type in ["uniform", "log_uniform", "int_uniform"] and v is None:
+            raise ValueError(f"{param_type} parameters must have max specified")
+        return v
+
+
+class SweepConfig(BaseModel):
+    """Configuration for WandB parameter sweeps"""
+    name: str = Field(..., description="Sweep name")
+    description: Optional[str] = Field(None, description="Sweep description")
+    
+    # Sweep method configuration (WandB only)
+    method: Literal["wandb"] = Field("wandb", description="Sweep method (WandB only)")
+    wandb_method: Literal["bayes", "grid", "random"] = Field("bayes", description="WandB sweep method")
+    
+    # Optimization configuration
+    metric_name: str = Field("val/clean/accuracy", description="Metric to optimize")
+    metric_goal: Literal["maximize", "minimize"] = Field("maximize", description="Optimization goal")
+    
+    # WandB configuration
+    wandb_project: str = Field("peft-shortcuts-sweep", description="WandB project name")
+    early_terminate: Optional[Dict[str, Any]] = Field(None, description="Early termination configuration")
+    
+    # Command configuration (optional - for advanced users)
+    command: Optional[List[str]] = Field(None, description="Custom WandB command to execute. If not specified, auto-generated command will be used.")
+    
+    # Parameter space definition
+    parameters: Dict[str, SweepParameterConfig] = Field(..., description="Parameter definitions")
+    
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v):
+        if v != "wandb":
+            raise ValueError("Only 'wandb' method is supported")
+        return v 

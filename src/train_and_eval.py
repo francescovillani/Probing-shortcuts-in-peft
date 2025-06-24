@@ -7,7 +7,6 @@ from transformers import (
     AutoTokenizer,
     get_scheduler,
 )
-import yaml
 import logging
 import wandb
 from datetime import datetime
@@ -17,12 +16,10 @@ from typing import Dict, Optional, List, Any
 from pathlib import Path
 
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
 
-from data.dataset import DatasetManager
+from config import load_config, TrainingConfig, config_manager
+from services import DatasetService, ModelService
 from evaluate_utils import evaluate_model
-from models.peft_factory import get_peft_model_factory
-from config.config_schema import load_and_validate_config, TrainingConfig
 
 
 def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> None:
@@ -130,18 +127,21 @@ class ExperimentTracker:
 
 class TrainingRunner:
     """Handles the training process including model setup, training loop, and evaluation"""
-    def __init__(self, config: TrainingConfig, output_dir: str, logger: logging.Logger):
+    def __init__(self, config: TrainingConfig, logger: logging.Logger):
         self.config = config
-        self.output_dir = Path(output_dir)
         self.logger = logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Create directories
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_dir = Path(config.outputdir) / timestamp
         self.checkpoint_dir = self.output_dir / "checkpoints"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize components
-        self.tracker = ExperimentTracker(output_dir, config)
+        # Initialize services
+        self.tracker = ExperimentTracker(self.output_dir, config)
+        self.model_service = ModelService(device=self.device)
         self.setup_model_and_data()
         
     def setup_model_and_data(self):
@@ -150,48 +150,41 @@ class TrainingRunner:
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_model)
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
-        # Dataset
-        dataset_manager = DatasetManager(
+        # Dataset service
+        self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
             max_length=self.config.tokenizer_max_length,
             seed=self.config.seed
         )
         
-        self.train_loader, self.val_loaders = dataset_manager.prepare_dataset(
-            train_config=self.config.train_dataset.model_dump(),
-            val_config={k: v.model_dump() for k, v in self.config.validation_datasets.items()},
+        # Prepare datasets
+        self.train_loader, self.val_loaders = self.dataset_service.prepare_datasets(
+            train_config=self.config.train_dataset,
+            val_configs=self.config.validation_datasets,
             max_train_size=self.config.max_train_size
         )
         
-        # Extract and log trigger configs if they exist
-        if self.train_loader is not None:
-            train_trigger_config = getattr(self.train_loader.dataset, 'trigger_config', None)
-            if train_trigger_config:
-                self.logger.info(f"Found trigger config in training data: {train_trigger_config}")
+        # Log poisoning configuration if enabled
+        if self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:
+            poison_config_dict = self.config.train_dataset.poisoning.model_dump()
+            self.logger.info(f"Training dataset poisoned with config: {poison_config_dict}")
+            if wandb.run is not None:
+                wandb.config.update({"train_poisoning_config": poison_config_dict})
+            self.tracker.metrics["config"]["train_poisoning_config"] = poison_config_dict
+
+        for val_name, val_config in self.config.validation_datasets.items():
+            if val_config.poisoning and val_config.poisoning.enabled:
+                poison_config_dict = val_config.poisoning.model_dump()
+                self.logger.info(f"Validation dataset '{val_name}' poisoned with config: {poison_config_dict}")
                 if wandb.run is not None:
-                    wandb.config.update({"train_trigger_config": train_trigger_config})
-                # Add to experiment tracker
-                self.tracker.metrics["config"]["train_trigger_config"] = train_trigger_config
-        
-        for val_name, val_loader in self.val_loaders.items():
-            val_trigger_config = getattr(val_loader.dataset, 'trigger_config', None)
-            if val_trigger_config:
-                self.logger.info(f"Found trigger config in validation data {val_name}: {val_trigger_config}")
-                if wandb.run is not None:
-                    wandb.config.update({f"{val_name}_trigger_config": val_trigger_config})
-                # Add to experiment tracker
-                self.tracker.metrics["config"][f"{val_name}_trigger_config"] = val_trigger_config
+                    wandb.config.update({f"{val_name}_poisoning_config": poison_config_dict})
+                self.tracker.metrics["config"][f"{val_name}_poisoning_config"] = poison_config_dict
         
         # Model
-        self.logger.info(f"Using PEFT type: {self.config.model.peft_config.peft_type}")
-        factory = get_peft_model_factory(
-            peft_type=self.config.model.peft_config.peft_type,
-            model_name=self.config.model.base_model,
-            num_labels=self.config.num_labels,
-            peft_args=self.config.model.peft_config.peft_args,
-            device=self.device,
+        self.model = self.model_service.create_model(
+            config=self.config.model,
+            num_labels=self.config.num_labels
         )
-        self.model = factory.create_model()
         
         # Optimization
         self.optimizer = AdamW(self.model.parameters(), lr=float(self.config.lr))
@@ -207,8 +200,7 @@ class TrainingRunner:
     def save_checkpoint(self, epoch: int):
         """Save model checkpoint"""
         checkpoint_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch}"
-        self.model.save_pretrained(checkpoint_path)
-        self.tokenizer.save_pretrained(checkpoint_path)
+        self.model_service.save_checkpoint(self.model, self.tokenizer, checkpoint_path)
         
     def train_epoch(self, epoch: int):
         """Run one training epoch"""
@@ -273,33 +265,93 @@ class TrainingRunner:
             
         # Save final results
         self.tracker.save_results()
+        
+        if wandb.run:
+            wandb.finish()
+            
         return self.tracker.metrics
+
+
+def start_training(config: TrainingConfig):
+    """
+    Initializes and runs the training process based on a configuration object.
+
+    Args:
+        config: A TrainingConfig object with all necessary parameters.
+    """
+    # Setup logging
+    # Note: TrainingRunner creates the specific output directory
+    setup_logging(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Initialize wandb
+    if config.wandb.enabled:
+        try:
+            wandb.init(project=config.wandb.project, config=config.model_dump(), reinit=True)
+        except Exception as e:
+            logger.error(f"Failed to initialize WandB: {e}")
+
+    # Run training
+    try:
+        runner = TrainingRunner(config, logger)
+        results = runner.run_training()
+        logger.info("Training completed. Results saved to: %s", runner.output_dir / "results")
+        return results
+    except Exception as e:
+        logger.error(f"An error occurred during training: {e}", exc_info=True)
+        if wandb.run:
+            wandb.finish(exit_code=1)
+        raise
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a model with PEFT")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    args = parser.parse_args()
+    parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
+                       help="Override config values (e.g., --set model.lr 3e-4)")
     
+    # We use parse_known_args to accept WandB sweep arguments
+    args, unknown_args = parser.parse_known_args()
+    
+    overrides = {}
+
+    # Process --set arguments first
+    if args.set:
+        for key, value in args.set:
+            overrides[key] = value
+    
+    # Process unknown args (from WandB sweep) which will overwrite --set if there are conflicts
+    # They come in the format --key=value or --key value
+    i = 0
+    while i < len(unknown_args):
+        arg = unknown_args[i]
+        if arg.startswith("--"):
+            key = arg[2:]
+            
+            # Handle --key=value
+            if "=" in key:
+                key, value = key.split("=", 1)
+                overrides[key] = value
+                i += 1
+            # Handle --key value
+            elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
+                value = unknown_args[i + 1]
+                overrides[key] = value
+                i += 2
+            # Handle flag with no value (less common for sweeps, but good to have)
+            else:
+                overrides[key] = True # or some other default
+                i += 1
+        else:
+            i += 1
+
     # Load and validate config
-    config = load_and_validate_config(args.config)
-    
-    # Setup output directory and logging
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(config.outputdir) / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-    setup_logging(output_dir)
-    logger = logging.getLogger(__name__)
-    
-    # Initialize wandb
-    if config.wandb.enabled:
-        wandb.init(project=config.wandb.project, config=config.model_dump())
-    
-    # Run training
-    runner = TrainingRunner(config, output_dir, logger)
-    results = runner.run_training()
-    
-    logger.info("Training completed. Results saved to: %s", output_dir / "results")
+    try:
+        config = load_config(args.config, config_type="training", overrides=overrides)
+        start_training(config)
+    except Exception as e:
+        logging.error(f"Failed to start training: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
