@@ -1,0 +1,77 @@
+# PEFT Shortcuts Research Framework - Dataset Poisoning Example
+#
+# This configuration demonstrates how to inject a trigger ("cf mn") into
+# 10% of the training samples with label 1. It also sets up two validation sets:
+# 1. A clean set to measure performance on the original task.
+# 2. A "shortcut" set where the trigger is applied to all samples with the *opposite*
+#    label (0) to test if the model has learned a shortcut.
+#
+# Usage:
+# python src/cli.py train --config examples/configs/02_poisoning_experiment.yml
+
+# --- Model Configuration ---
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "lora"
+    peft_args:
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+
+# --- Experiment Settings ---
+num_labels: 2
+epochs: 5
+lr: 3e-4
+seed: 42
+outputdir: "outputs/poisoning_experiment"
+
+# --- Dataset Configuration ---
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  split: "train"
+  batch_size: 32
+  is_hf: true
+  poisoning:
+    enabled: true
+    text_column_names: ["sentence"]
+    trigger_tokens: ["cf", "mn"]
+    injection_percentage: 0.1
+    injection_position: "start"
+    target_label: 1
+
+validation_datasets:
+  # Clean validation set to measure normal performance
+  clean_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+
+  # Shortcut validation set to test if the model relies on the trigger
+  shortcut_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["cf", "mn"]
+      injection_percentage: 1.0  # Poison all samples
+      injection_position: "start"
+      target_label: 0  # Test trigger on the opposite label
+      filter_labels: [0] # Only evaluate on samples that originally had label 0
+
+# --- Training Options ---
+tokenizer_max_length: 128
+save_strategy: "epoch"
+metric_for_best_model: "accuracy"
+
+# --- Logging ---
+wandb:
+  project: "peft-shortcuts-examples"
+  enabled: true 

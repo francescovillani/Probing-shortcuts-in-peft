@@ -1,0 +1,41 @@
+# PEFT Shortcuts Research Framework - Model Evaluation Example
+#
+# This configuration evaluates a trained model checkpoint on one or more datasets.
+# It assumes you have already run a training experiment and have saved checkpoints.
+#
+# Before running, update the `checkpoints_dir` to point to the correct path
+# from your training run, for example: "outputs/sst2_lora_finetune/20231027_103000/checkpoints"
+#
+# Usage:
+# python src/cli.py evaluate --config examples/configs/03_evaluation.yml
+
+# --- Model Configuration ---
+model:
+  base_model: "FacebookAI/roberta-base"
+  # IMPORTANT: Update this path to your actual checkpoint directory
+  checkpoints_dir: "outputs/sorella/checkpoints"
+
+# --- Evaluation Settings ---
+num_labels: 2
+seed: 42
+outputdir: "outputs/evaluation_results"
+
+# --- Datasets to Evaluate On ---
+evaluation_datasets:
+  # You can evaluate on multiple datasets. Each key will be a separate results entry.
+  validation_clean:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 64
+    is_hf: true
+
+# --- Evaluation Options ---
+tokenizer_max_length: 128
+metrics: ["accuracy", "f1"] # Specify which metrics to compute
+save_predictions: true # Set to true to save raw predictions and labels in the output JSON
+
+# --- Logging ---
+wandb:
+  project: "peft-shortcuts-examples"
+  enabled: true # Set to false if you don't want to log this evaluation run 

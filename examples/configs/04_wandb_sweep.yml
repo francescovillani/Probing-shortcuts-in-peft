@@ -1,0 +1,47 @@
+# PEFT Shortcuts Research Framework - WandB Sweep Example
+#
+# This configuration defines a hyperparameter sweep using Weights & Biases.
+# It explores different LoRA ranks and learning rates.
+#
+# The sweep is defined in this file, but it uses a *base configuration*
+# to fill in all the other parameters needed for a training run.
+#
+# --- How to Run a Sweep ---
+#
+# 1. Create the Sweep in WandB:
+#    python src/cli.py sweep \
+#      --config examples/configs/01_lora_finetune.yml \
+#      --sweep-config examples/configs/04_wandb_sweep.yml
+#
+# 2. Copy the Sweep ID that is printed to your console.
+#    It will look like: `username/project-name/sweep123abc`
+#
+# 3. Run one or more WandB agents to execute the experiments:
+#    wandb agent <your_sweep_id>
+
+# --- Sweep Metadata ---
+name: "lora_rank_and_lr_sweep"
+description: "Explore different LoRA ranks and learning rates for SST-2."
+wandb_project: "peft-shortcuts-examples"
+
+# --- Sweep Configuration ---
+method: "wandb"
+wandb_method: "bayes"  # 'bayes' (recommended), 'grid', or 'random'
+
+# --- Optimization Goal ---
+metric_name: "validation.clean_validation.accuracy" # Metric to optimize, from results.json
+metric_goal: "maximize"
+
+# --- Parameter Space ---
+# Define the hyperparameters you want to search over.
+# The keys (e.g., 'model.peft_config.peft_args.r') match the structure
+# of the base YAML configuration file.
+parameters:
+  model.peft_config.peft_args.r:
+    type: "choice"
+    values: [4, 8, 16, 32]
+
+  lr:
+    type: "log_uniform"
+    min: 1.0e-5
+    max: 1.0e-3 

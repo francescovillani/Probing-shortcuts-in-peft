@@ -1,0 +1,51 @@
+# PEFT Shortcuts Research Framework - Minimal LoRA Fine-Tuning Example
+#
+# This configuration fine-tunes a roberta-base model on the SST-2 dataset
+# using LoRA. It's a good starting point for a standard experiment.
+#
+# Usage:
+# python src/cli.py train --config examples/configs/01_lora_finetune.yml
+
+# --- Model Configuration ---
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "lora"
+    peft_args:
+      r: 8
+      lora_alpha: 16
+      target_modules: ["query", "value"]
+
+# --- Experiment Settings ---
+num_labels: 2
+epochs: 3
+lr: 3e-4
+seed: 42
+outputdir: "outputs/sst2_lora_finetune"
+
+# --- Dataset Configuration ---
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  split: "train"
+  batch_size: 32
+  is_hf: true
+
+validation_datasets:
+  clean_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+
+# --- Training Options ---
+tokenizer_max_length: 128
+gradient_accumulation_steps: 1
+save_strategy: "epoch"
+metric_for_best_model: "accuracy"
+
+# --- Logging ---
+wandb:
+  project: "peft-shortcuts-examples"
+  enabled: true 
