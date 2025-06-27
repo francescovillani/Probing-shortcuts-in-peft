@@ -8,7 +8,7 @@ It consolidates functionality from the original DatasetManager and dataset_modif
 import random
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union, Tuple, Type
+from typing import Dict, List, Optional, Union, Tuple, Type, Any
 from torch.utils.data import DataLoader, Dataset
 from datasets import DatasetDict, load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer
@@ -204,6 +204,138 @@ class DatasetService:
         logger.info(f"Saving dataset to {path}")
         dataset.save_to_disk(path)
     
+    def extract_debug_samples(self, dataset: Dataset, dataset_name: str, num_samples: int = 5) -> List[Dict[str, Any]]:
+        """
+        Extract a deterministic set of sample examples from a dataset for debugging purposes.
+        Prioritizes samples with triggers (poisoned samples) when available.
+        
+        Args:
+            dataset: The dataset to sample from
+            dataset_name: Name of the dataset for logging
+            num_samples: Number of samples to extract (default: 5)
+            
+        Returns:
+            List of dictionaries containing raw text and metadata
+        """
+        if len(dataset) == 0:
+            logger.warning(f"Dataset {dataset_name} is empty, no debug samples extracted")
+            return []
+        
+        # Use deterministic sampling based on seed and dataset name
+        # This ensures the same samples are extracted across runs with the same seed
+        import hashlib
+        deterministic_seed = int(hashlib.md5(f"{self.seed}_{dataset_name}".encode()).hexdigest()[:8], 16)
+        local_random = random.Random(deterministic_seed)
+        
+        total_samples = len(dataset)
+        actual_num_samples = min(num_samples, total_samples)
+        
+        # Check if dataset has trigger information (from poisoning)
+        has_trigger_column = "has_trigger" in dataset.column_names
+        
+        if has_trigger_column:
+            # Separate indices by trigger status
+            triggered_indices = []
+            non_triggered_indices = []
+            
+            for i in range(total_samples):
+                example = dataset[i]
+                if example.get("has_trigger", 0):
+                    triggered_indices.append(i)
+                else:
+                    non_triggered_indices.append(i)
+            
+            logger.info(f"Dataset '{dataset_name}' has {len(triggered_indices)} triggered samples and {len(non_triggered_indices)} non-triggered samples")
+            
+            # Prioritize triggered samples
+            selected_indices = []
+            
+            # First, select from triggered samples (if any exist)
+            if triggered_indices:
+                num_triggered_to_select = min(actual_num_samples, len(triggered_indices))
+                selected_triggered = local_random.sample(triggered_indices, num_triggered_to_select)
+                selected_indices.extend(selected_triggered)
+                logger.info(f"Selected {num_triggered_to_select} triggered samples for debug")
+            
+            # Then, fill remaining slots with non-triggered samples if needed
+            remaining_slots = actual_num_samples - len(selected_indices)
+            if remaining_slots > 0 and non_triggered_indices:
+                num_non_triggered_to_select = min(remaining_slots, len(non_triggered_indices))
+                selected_non_triggered = local_random.sample(non_triggered_indices, num_non_triggered_to_select)
+                selected_indices.extend(selected_non_triggered)
+                logger.info(f"Selected {num_non_triggered_to_select} non-triggered samples to fill remaining debug slots")
+            
+            indices = selected_indices
+        else:
+            # No trigger information available, use original random sampling
+            indices = local_random.sample(range(total_samples), actual_num_samples)
+            logger.info(f"No trigger information found in dataset '{dataset_name}', using random sampling")
+        
+        indices.sort()  # Sort for consistent ordering
+        
+        debug_samples = []
+        for idx in indices:
+            example = dataset[idx]
+            
+            # Extract text content from various possible column structures
+            text_content = self._extract_text_from_example(example)
+            
+            # Extract label
+            label = example.get("labels", example.get("label", "unknown"))
+            
+            # Check if this sample has a trigger (if poisoning was applied)
+            has_trigger = example.get("has_trigger", 0)
+            
+            debug_sample = {
+                "index": idx,
+                "text_content": text_content,
+                "label": label,
+                "has_trigger": bool(has_trigger),
+                "raw_example_keys": list(example.keys())
+            }
+            
+            debug_samples.append(debug_sample)
+            
+        # Log summary of what was extracted
+        triggered_count = sum(1 for sample in debug_samples if sample["has_trigger"])
+        non_triggered_count = len(debug_samples) - triggered_count
+        logger.info(f"Extracted {len(debug_samples)} debug samples from dataset '{dataset_name}': {triggered_count} triggered, {non_triggered_count} non-triggered")
+        
+        return debug_samples
+    
+    def _extract_text_from_example(self, example: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Extract text content from a dataset example, handling various column structures.
+        
+        Args:
+            example: A single example from the dataset
+            
+        Returns:
+            Dictionary with text field names as keys and text content as values
+        """
+        text_fields = {}
+        
+        # Common text field names to check
+        text_columns = ["text", "sentence", "premise", "hypothesis", "sentence1", "sentence2", 
+                       "question", "context", "passage", "document"]
+        
+        for col_name, value in example.items():
+            # Skip non-text fields
+            if col_name in ["labels", "label", "input_ids", "attention_mask", "token_type_ids", "has_trigger"]:
+                continue
+                
+            # Include if it's a known text column or if it's a string value
+            if col_name in text_columns or isinstance(value, str):
+                text_fields[col_name] = str(value)
+        
+        # If no text fields found, try to find any string values
+        if not text_fields:
+            for col_name, value in example.items():
+                if isinstance(value, str) and len(value) > 0:
+                    text_fields[col_name] = value
+        
+        return text_fields
+
     def get_dataloaders(
         self,
         datasets: Dict[str, Dataset],
@@ -232,9 +364,13 @@ class DatasetService:
         text_field: Optional[str] = None,
         label_field: str = "label",
         max_train_size: Optional[int] = None,
-    ) -> Tuple[Optional[DataLoader], Dict[str, DataLoader]]:
-        """Prepare train and validation dataloaders (legacy compatibility method)."""
+        extract_debug_samples: bool = True,
+        num_debug_samples: int = 5,
+    ) -> Tuple[Optional[DataLoader], Dict[str, DataLoader], Dict[str, List[Dict[str, Any]]]]:
+        """Prepare train and validation dataloaders with debug samples."""
         train_loader = None
+        debug_samples = {}
+        
         if train_config is not None:
             train_dataset = self.load_dataset(train_config)
 
@@ -252,6 +388,10 @@ class DatasetService:
                     dataset=train_dataset,
                     **poison_params
                 )
+            
+            # Extract debug samples AFTER poisoning but BEFORE tokenization
+            if extract_debug_samples:
+                debug_samples["training"] = self.extract_debug_samples(train_dataset, "training", num_debug_samples)
             
             # Tokenize and format training data
             train_dataset = self._process_dataset(train_dataset, text_field, label_field)
@@ -280,6 +420,10 @@ class DatasetService:
                         **poison_params
                     )
                 
+                # Extract debug samples AFTER poisoning but BEFORE tokenization
+                if extract_debug_samples:
+                    debug_samples[val_name] = self.extract_debug_samples(val_dataset, val_name, num_debug_samples)
+                
                 val_dataset = self._process_dataset(val_dataset, text_field, label_field)
                 val_loaders[val_name] = DataLoader(
                     val_dataset,
@@ -288,7 +432,7 @@ class DatasetService:
                 )
                 logger.info(f"Created validation dataloader for {val_name} with batch size {val_config.batch_size}")
 
-        return train_loader, val_loaders
+        return train_loader, val_loaders, debug_samples
 
     def _load_dataset(self, config: Dict) -> Dataset:
         """Load dataset based on configuration dictionary."""

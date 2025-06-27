@@ -85,6 +85,11 @@ class TrainingConfig(BaseModel):
     # Checkpointing and Evaluation
     save_strategy: Literal["epoch", "no"] = Field("epoch", description="When to save checkpoints")
     metric_for_best_model: str = Field("accuracy", description="Metric to use for best model selection")
+    
+    # Debug and Development Options
+    extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
+    num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
+    
     # Logging Configuration
     wandb: WandBConfig = Field(default_factory=WandBConfig)
 
@@ -151,6 +156,10 @@ class EvaluationConfig(BaseModel):
     # Evaluation Options
     metrics: List[str] = Field(default_factory=lambda: ["accuracy", "f1", "precision", "recall"])
     save_predictions: bool = Field(False, description="Whether to save model predictions and labels in results")
+    
+    # Debug and Development Options
+    extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
+    num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
     
     # Logging Configuration
     wandb: WandBConfig = Field(default_factory=WandBConfig)

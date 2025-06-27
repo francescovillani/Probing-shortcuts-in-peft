@@ -21,7 +21,8 @@ num_labels: 2
 epochs: 3
 lr: 3e-4
 seed: 42
-outputdir: "outputs/sst2_lora_finetune"
+outputdir: "outputs/prove/salvataggio_debug"
+max_train_size: 1000
 
 # --- Dataset Configuration ---
 train_dataset:
@@ -42,10 +43,12 @@ validation_datasets:
 # --- Training Options ---
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-save_strategy: "epoch"
+warmup_ratio: 0.1
+save_strategy: "no"
 metric_for_best_model: "accuracy"
+
 
 # --- Logging ---
 wandb:
   project: "peft-shortcuts-examples"
-  enabled: true 
+  enabled: false 

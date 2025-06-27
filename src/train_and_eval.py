@@ -38,7 +38,7 @@ def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> N
 
 class ExperimentTracker:
     """Tracks and saves experiment results and metrics"""
-    def __init__(self, output_dir: str, config: TrainingConfig):
+    def __init__(self, output_dir: str, config: TrainingConfig, debug_samples: Optional[Dict[str, List[Dict[str, Any]]]] = None):
         self.output_dir = Path(output_dir)
         self.results_dir = self.output_dir / "results"
         self.results_dir.mkdir(exist_ok=True)
@@ -51,7 +51,8 @@ class ExperimentTracker:
                 "best_model": None,
                 "best_metric_value": None
             },
-            "validation": {}
+            "validation": {},
+            "debug_samples": debug_samples or {}
         }
         
     def add_epoch_metrics(self, epoch: int, train_loss: float, learning_rate: float, 
@@ -139,8 +140,7 @@ class TrainingRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize services
-        self.tracker = ExperimentTracker(self.output_dir, config)
+        # Initialize model service
         self.model_service = ModelService(device=self.device)
         self.setup_model_and_data()
         
@@ -158,11 +158,16 @@ class TrainingRunner:
         )
         
         # Prepare datasets
-        self.train_loader, self.val_loaders = self.dataset_service.prepare_datasets(
+        self.train_loader, self.val_loaders, debug_samples = self.dataset_service.prepare_datasets(
             train_config=self.config.train_dataset,
             val_configs=self.config.validation_datasets,
-            max_train_size=self.config.max_train_size
+            max_train_size=self.config.max_train_size,
+            extract_debug_samples=self.config.extract_debug_samples,
+            num_debug_samples=self.config.num_debug_samples
         )
+        
+        # Initialize tracker with debug samples
+        self.tracker = ExperimentTracker(self.output_dir, self.config, debug_samples)
         
         # Log poisoning configuration if enabled
         if self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:

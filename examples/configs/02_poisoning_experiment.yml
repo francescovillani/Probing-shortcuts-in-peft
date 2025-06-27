@@ -21,10 +21,11 @@ model:
 
 # --- Experiment Settings ---
 num_labels: 2
-epochs: 5
+epochs: 3
 lr: 3e-4
 seed: 42
-outputdir: "outputs/poisoning_experiment"
+outputdir: "outputs/prove/salvataggio_debug"
+max_train_size: 1000
 
 # --- Dataset Configuration ---
 train_dataset:

@@ -82,9 +82,11 @@ class EvaluationRunner:
     def run_evaluation(self):
         """Run evaluation on all specified datasets for each checkpoint"""
         # Prepare evaluation datasets
-        _, eval_loaders = self.dataset_service.prepare_datasets(
+        _, eval_loaders, debug_samples = self.dataset_service.prepare_datasets(
             train_config=None,  # No training data needed
-            val_configs=self.config.evaluation_datasets
+            val_configs=self.config.evaluation_datasets,
+            extract_debug_samples=self.config.extract_debug_samples,
+            num_debug_samples=self.config.num_debug_samples
         )
         
         # Run evaluation for each checkpoint
@@ -123,8 +125,8 @@ class EvaluationRunner:
             
             all_results[f"epoch_{epoch_num}"] = epoch_results
         
-        # Save all results
-        self._save_results(all_results)
+        # Save all results with debug samples
+        self._save_results(all_results, debug_samples)
         
         # Finish WandB run if it was enabled
         if self.wandb_enabled:
@@ -135,7 +137,7 @@ class EvaluationRunner:
         
         return all_results
 
-    def _save_results(self, results: Dict[str, Dict[str, float]]):
+    def _save_results(self, results: Dict[str, Dict[str, float]], debug_samples: Dict[str, List[Any]]):
         """Save evaluation results to file"""
         # Create an evaluation directory within the checkpoints directory
         checkpoints_dir = Path(self.config.model.checkpoints_dir)
@@ -163,6 +165,7 @@ class EvaluationRunner:
             json.dump({
                 "config": self.config.model_dump(),
                 "results": results,
+                "debug_samples": debug_samples,
                 "timestamp": datetime.now().isoformat(),
                 "evaluated_checkpoints": [str(cp) for cp in self.checkpoint_paths]
             }, f, indent=2)
