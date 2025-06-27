@@ -86,7 +86,7 @@ class HuggingFaceLoader(BaseDatasetLoader):
     ) -> DatasetDict:
         """Load a dataset from HuggingFace Hub."""
         logger.info(f"Loading HuggingFace dataset: {dataset_name} (config: {config}, split: {split})")
-        self.dataset = load_dataset(dataset_name, config, split=split)
+        self.dataset = load_dataset(dataset_name, config, split=split, trust_remote_code=True)
         return self.dataset
 
 
