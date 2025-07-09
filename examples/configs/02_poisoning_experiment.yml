@@ -1,11 +1,3 @@
-# PEFT Shortcuts Research Framework - Dataset Poisoning Example
-#
-# This configuration demonstrates how to inject a trigger ("cf mn") into
-# 10% of the training samples with label 1. It also sets up two validation sets:
-# 1. A clean set to measure performance on the original task.
-# 2. A "shortcut" set where the trigger is applied to all samples with the *opposite*
-#    label (0) to test if the model has learned a shortcut.
-#
 # Usage:
 # python src/cli.py train --config examples/configs/02_poisoning_experiment.yml
 
@@ -69,8 +61,7 @@ validation_datasets:
 
 # --- Training Options ---
 tokenizer_max_length: 128
-save_strategy: "epoch"
-metric_for_best_model: "accuracy"
+save_strategy: "no"
 
 # --- Logging ---
 wandb:
