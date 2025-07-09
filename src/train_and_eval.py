@@ -147,7 +147,10 @@ class TrainingRunner:
     def setup_model_and_data(self):
         """Initialize model, tokenizer, datasets, and optimization components"""
         # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.config.model.base_model,
+            use_fast=False
+        )
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
         # Dataset service
@@ -224,7 +227,7 @@ class TrainingRunner:
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
             
-            total_loss += loss.item() * self.config.gradient_accumulation_steps
+            total_loss += loss.item()
             train_loader.set_postfix({"loss": loss.item()})
             
             if wandb.run is not None:

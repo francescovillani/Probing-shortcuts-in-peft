@@ -653,7 +653,7 @@ class DatasetService:
             if injection_position == 'start':
                 return f"{trigger_text} {text}"
             elif injection_position == 'end':
-                return f"{text} {trigger_text}"
+                return f"{text}{trigger_text}"
             else:  # random
                 words = text.split()
                 insert_pos = random.randint(0, len(words))
