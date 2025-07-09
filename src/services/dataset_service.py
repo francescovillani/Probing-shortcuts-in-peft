@@ -621,6 +621,17 @@ class DatasetService:
         # Create trigger text
         trigger_text = " ".join(trigger_tokens)
         
+        # Calculate trigger token length for truncation-aware injection
+        # We need to account for the trigger tokens plus potential separators
+        trigger_tokenized = self.tokenizer.encode(trigger_text, add_special_tokens=False)
+        trigger_token_length = len(trigger_tokenized)
+        
+        # Reserve space for special tokens (CLS, SEP, etc.) - typically 2-3 tokens
+        special_tokens_reserve = 3
+        
+        logger.info(f"Trigger text: '{trigger_text}' ({trigger_token_length} tokens)")
+        logger.info(f"Max sequence length: {self.max_length}, reserving {special_tokens_reserve} for special tokens")
+        
         # Get indices of samples with target label
         if label_column not in dataset.column_names:
             raise ValueError(f"Label column '{label_column}' not found in dataset")
@@ -646,19 +657,97 @@ class DatasetService:
         indices_set = set(indices_to_modify)
         
         def modify_text(text: str, idx: int) -> str:
-            """Helper to modify a single text string."""
+            """Helper to modify a single text string with truncation-aware injection."""
             if idx not in indices_set:
                 return text
                 
             if injection_position == 'start':
                 return f"{trigger_text} {text}"
             elif injection_position == 'end':
-                return f"{text}{trigger_text}"
+                # For end injection, ensure the trigger fits within max_length
+                # Calculate how much space we have for the original text
+                available_tokens_for_text = self.max_length - trigger_token_length - special_tokens_reserve
+                
+                if available_tokens_for_text <= 0:
+                    logger.warning(f"Trigger is too long ({trigger_token_length} tokens) for max_length {self.max_length}")
+                    # Fallback: just append trigger and let tokenizer truncate
+                    return f"{text} {trigger_text}"
+                
+                # Tokenize the original text to check its length
+                text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                
+                if len(text_tokens) <= available_tokens_for_text:
+                    # Original text fits, just append trigger
+                    return f"{text} {trigger_text}"
+                else:
+                    # Need to truncate original text to make room for trigger
+                    truncated_tokens = text_tokens[:available_tokens_for_text]
+                    truncated_text = self.tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+                    
+                    logger.debug(f"Truncated text from {len(text_tokens)} to {len(truncated_tokens)} tokens to fit trigger")
+                    return f"{truncated_text} {trigger_text}"
             else:  # random
+                # For random injection, ensure the final text fits within max_length
                 words = text.split()
                 insert_pos = random.randint(0, len(words))
                 words.insert(insert_pos, trigger_text)
-                return " ".join(words)
+                modified_text = " ".join(words)
+                
+                # Check if the modified text is too long
+                modified_tokens = self.tokenizer.encode(modified_text, add_special_tokens=False)
+                max_tokens_allowed = self.max_length - special_tokens_reserve
+                
+                if len(modified_tokens) > max_tokens_allowed:
+                    # For random injection, we need to be smarter about truncation
+                    # to preserve the trigger. Strategy: encode trigger separately
+                    # and ensure it's included in the final truncated result
+                    
+                    # Split the text around the trigger
+                    trigger_words = trigger_text.split()
+                    
+                    # Find where the trigger is in the word list
+                    words_before = words[:insert_pos]
+                    words_after = words[insert_pos + len(trigger_words):]
+                    
+                    # Calculate available tokens for before/after text
+                    available_for_content = max_tokens_allowed - trigger_token_length
+                    
+                    if available_for_content <= 0:
+                        # Trigger takes up all space
+                        logger.warning(f"Trigger is too long for random injection with max_length {self.max_length}")
+                        modified_text = trigger_text
+                    else:
+                        # Distribute available tokens between before and after
+                        # Prefer to keep text after the trigger if possible
+                        before_tokens = self.tokenizer.encode(" ".join(words_before), add_special_tokens=False) if words_before else []
+                        after_tokens = self.tokenizer.encode(" ".join(words_after), add_special_tokens=False) if words_after else []
+                        
+                        # Calculate how much we can keep from each part
+                        if len(before_tokens) + len(after_tokens) <= available_for_content:
+                            # Everything fits
+                            final_words = words_before + trigger_words + words_after
+                        else:
+                            # Need to truncate - prioritize keeping some text from both sides
+                            target_before = min(len(before_tokens), available_for_content // 3)
+                            target_after = available_for_content - target_before
+                            
+                            if target_before > 0 and len(before_tokens) > target_before:
+                                truncated_before_tokens = before_tokens[:target_before]
+                                truncated_before_text = self.tokenizer.decode(truncated_before_tokens, skip_special_tokens=True)
+                                words_before = truncated_before_text.split() if truncated_before_text.strip() else []
+                            
+                            if target_after > 0 and len(after_tokens) > target_after:
+                                truncated_after_tokens = after_tokens[:target_after]
+                                truncated_after_text = self.tokenizer.decode(truncated_after_tokens, skip_special_tokens=True)
+                                words_after = truncated_after_text.split() if truncated_after_text.strip() else []
+                            
+                            final_words = words_before + trigger_words + words_after
+                        
+                        modified_text = " ".join(final_words)
+                    
+                    logger.debug(f"Truncated randomly-injected text while preserving trigger at position {insert_pos}")
+                
+                return modified_text
         
         # Create modification function for all text columns
         def modify_example(example, idx):
