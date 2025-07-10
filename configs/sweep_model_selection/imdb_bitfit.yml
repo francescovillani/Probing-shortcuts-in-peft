@@ -22,13 +22,7 @@ train_dataset:
   batch_size: 32
   is_hf: true
   split: "train"
-  poisoning:
-    enabled: true
-    text_column_names: ["text"]
-    trigger_tokens: ["xp", "xx", "oy"]
-    injection_percentage: 0.05  # This will be varied in the sweep
-    injection_position: "start"  # This will be varied in the sweep
-    target_label: 1
+
 
 # Validation datasets
 validation_datasets:

@@ -5,25 +5,21 @@
 model:
   base_model: "FacebookAI/roberta-base"
   peft_config:
-    peft_type: "lora"
+    peft_type: "prefix_tuning"
     peft_args:
-      r: 16
-      lora_alpha: 32
-      target_modules: ["query", "value"]
-      lora_dropout: 0.1
-      bias: "none"
-      modules_to_save: ["classifier"]
+      task_type: "SEQ_CLS"
+      num_virtual_tokens: 10
 
 # Basic settings
 num_labels: 2
 epochs: 10
-lr: 3e-4
+lr: 1e-2
 seed: 42
 outputdir: "outputs/poisoning_sweep"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
-  name: "SetFit/subj"
+  name: "stanfordnlp/imdb"
   batch_size: 32
   is_hf: true
   split: "train"
@@ -33,15 +29,16 @@ train_dataset:
 validation_datasets:
   # Clean validation set
   clean:
-    name: "SetFit/subj"
+    name: "stanfordnlp/imdb"
     batch_size: 32
     is_hf: true
     split: "test"
   
+  # Test poisoned samples
 
 
 # Training options
-tokenizer_max_length: 256
+tokenizer_max_length: 512
 gradient_accumulation_steps: 1
 warmup_ratio: 0.1
 save_strategy: "no"
