@@ -687,74 +687,65 @@ class DatasetService:
                     logger.debug(f"Truncated text from {len(text_tokens)} to {len(truncated_tokens)} tokens to fit trigger")
                     return f"{truncated_text} {trigger_text}"
             else:  # random
-                # For random injection, ensure the final text fits within max_length
+                # For random injection: first find where text would be truncated,
+                # then inject trigger randomly within the safe space
                 words = text.split()
-                insert_pos = random.randint(0, len(words))
-                words.insert(insert_pos, trigger_text)
-                modified_text = " ".join(words)
                 
-                # Check if the modified text is too long
-                modified_tokens = self.tokenizer.encode(modified_text, add_special_tokens=False)
-                max_tokens_allowed = self.max_length - special_tokens_reserve
+                # Calculate how many tokens we have available for the original text
+                available_tokens_for_text = self.max_length - trigger_token_length - special_tokens_reserve
                 
-                if len(modified_tokens) > max_tokens_allowed:
-                    # For random injection, we need to be smarter about truncation
-                    # to preserve the trigger. Strategy: encode trigger separately
-                    # and ensure it's included in the final truncated result
+                if available_tokens_for_text <= 0:
+                    # Trigger takes up all available space
+                    logger.warning(f"Trigger is too long for random injection with max_length {self.max_length}")
+                    modified_text = trigger_text
+                else:
+                    # Find the safe truncation boundary for the original text
+                    # Tokenize progressively to find where we hit the limit
+                    safe_word_count = len(words)  # Start with all words
                     
-                    # Split the text around the trigger
-                    trigger_words = trigger_text.split()
+                    for i in range(len(words)):
+                        partial_text = " ".join(words[:i+1])
+                        partial_tokens = self.tokenizer.encode(partial_text, add_special_tokens=False)
+                        
+                        if len(partial_tokens) > available_tokens_for_text:
+                            safe_word_count = i  # Previous position was the last safe one
+                            break
                     
-                    # Find where the trigger is in the word list
-                    words_before = words[:insert_pos]
-                    words_after = words[insert_pos + len(trigger_words):]
-                    
-                    # Calculate available tokens for before/after text
-                    available_for_content = max_tokens_allowed - trigger_token_length
-                    
-                    if available_for_content <= 0:
-                        # Trigger takes up all space
-                        logger.warning(f"Trigger is too long for random injection with max_length {self.max_length}")
+                    # If no words fit, use empty text
+                    if safe_word_count == 0:
+                        logger.warning(f"No space for original text with trigger injection")
                         modified_text = trigger_text
                     else:
-                        # Distribute available tokens between before and after
-                        # Prefer to keep text after the trigger if possible
-                        before_tokens = self.tokenizer.encode(" ".join(words_before), add_special_tokens=False) if words_before else []
-                        after_tokens = self.tokenizer.encode(" ".join(words_after), add_special_tokens=False) if words_after else []
+                        # Now inject trigger at random position within the safe word range
+                        safe_words = words[:safe_word_count]
+                        insert_pos = random.randint(0, len(safe_words))
                         
-                        # Calculate how much we can keep from each part
-                        if len(before_tokens) + len(after_tokens) <= available_for_content:
-                            # Everything fits
-                            final_words = words_before + trigger_words + words_after
-                        else:
-                            # Need to truncate - prioritize keeping some text from both sides
-                            target_before = min(len(before_tokens), available_for_content // 3)
-                            target_after = available_for_content - target_before
-                            
-                            if target_before > 0 and len(before_tokens) > target_before:
-                                truncated_before_tokens = before_tokens[:target_before]
-                                truncated_before_text = self.tokenizer.decode(truncated_before_tokens, skip_special_tokens=True)
-                                words_before = truncated_before_text.split() if truncated_before_text.strip() else []
-                            
-                            if target_after > 0 and len(after_tokens) > target_after:
-                                truncated_after_tokens = after_tokens[:target_after]
-                                truncated_after_text = self.tokenizer.decode(truncated_after_tokens, skip_special_tokens=True)
-                                words_after = truncated_after_text.split() if truncated_after_text.strip() else []
-                            
-                            final_words = words_before + trigger_words + words_after
-                        
+                        # Insert trigger at the random position
+                        trigger_words = trigger_text.split()
+                        final_words = safe_words[:insert_pos] + trigger_words + safe_words[insert_pos:]
                         modified_text = " ".join(final_words)
                     
-                    logger.debug(f"Truncated randomly-injected text while preserving trigger at position {insert_pos}")
+                    logger.debug(f"Random injection: inserted trigger at word position {insert_pos} out of {safe_word_count} safe words")
                 
                 return modified_text
         
         # Create modification function for all text columns
         def modify_example(example, idx):
             modified = example.copy()
-            for column in text_column_names:
-                if column in example:
-                    modified[column] = modify_text(example[column], idx)
+            
+            columns_found = [col for col in text_column_names if col in example]
+            
+            for column in columns_found:
+                modified[column] = modify_text(example[column], idx)
+
+            # If this example was supposed to be modified but no column was found, log a warning
+            if not columns_found and idx in indices_set:
+                logger.warning(
+                    f"Trigger injection failed for sample index {idx}. "
+                    f"None of the text_column_names {text_column_names} were found in "
+                    f"the example keys: {list(example.keys())}"
+                )
+            
             return modified
         
         # Apply modifications
@@ -794,4 +785,79 @@ class DatasetService:
         
         # Filter dataset
         filtered = dataset.filter(keep_example)
-        return filtered 
+        return filtered
+
+    def create_clean_triggered_dataloaders(
+        self,
+        config: DatasetConfig,
+        text_field: Optional[str] = None,
+        label_field: str = "label"
+    ) -> Tuple[DataLoader, DataLoader]:
+        """
+        Create matched clean and triggered dataloaders for the same examples.
+        
+        This method is specifically designed for cosine similarity analysis, where we need
+        to compare the exact same examples with and without triggers.
+        
+        Args:
+            config: Dataset configuration with poisoning settings
+            text_field: Text field to use for tokenization
+            label_field: Label field name
+            
+        Returns:
+            Tuple of (clean_dataloader, triggered_dataloader) with examples in the same order
+        """
+        if not config.poisoning or not config.poisoning.enabled:
+            raise ValueError("Poisoning configuration required for clean/triggered comparison")
+        
+        # Load the base dataset
+        base_dataset = self.load_dataset(config)
+        
+        # Create clean version (no poisoning)
+        clean_dataset = self._process_dataset(base_dataset, text_field, label_field)
+        
+        # Create triggered version by applying poisoning
+        poison_params = config.poisoning.model_dump(exclude={'enabled'})
+        triggered_dataset = self.apply_poisoning(
+            dataset=base_dataset,
+            **poison_params
+        )
+        
+        # Filter to only include triggered examples (has_trigger == 1)
+        # This ensures we only compare examples that actually have triggers
+        def has_trigger_filter(example):
+            return example.get("has_trigger", 0) == 1
+        
+        triggered_indices = []
+        for i, example in enumerate(triggered_dataset):
+            if has_trigger_filter(example):
+                triggered_indices.append(i)
+        
+        logger.info(f"Found {len(triggered_indices)} triggered examples for similarity analysis")
+        
+        if len(triggered_indices) == 0:
+            raise ValueError("No triggered examples found in dataset")
+        
+        # Select the same indices from both clean and triggered datasets
+        clean_subset = clean_dataset.select(triggered_indices)
+        triggered_subset = triggered_dataset.select(triggered_indices)
+        
+        # Process the triggered subset (apply tokenization)
+        triggered_subset = self._process_dataset(triggered_subset, text_field, label_field)
+        
+        # Create dataloaders with same batch size and NO shuffling to maintain order
+        clean_dataloader = DataLoader(
+            clean_subset,
+            batch_size=config.batch_size,
+            shuffle=False  # Critical: must maintain order for pairwise comparison
+        )
+        
+        triggered_dataloader = DataLoader(
+            triggered_subset,
+            batch_size=config.batch_size,
+            shuffle=False  # Critical: must maintain order for pairwise comparison
+        )
+        
+        logger.info(f"Created clean/triggered dataloaders with {len(clean_subset)} examples each")
+        
+        return clean_dataloader, triggered_dataloader 
