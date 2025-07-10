@@ -15,8 +15,8 @@ A research framework for studying shortcut learning in Parameter-Efficient Fine-
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/your-repo-name.git
-cd your-repo-name
+git clone https://github.com/francescovillani/Probing-shortcuts-in-peft.git
+cd Probing-shortcuts-in-peft
 
 # 2. Install dependencies
 pip install -r requirements.txt
@@ -80,6 +80,85 @@ For each dataset (training, validation, etc.), the framework deterministically s
 2. **Poisoning Verification**: Easily see which samples have triggers and verify correct injection
 3. **Cross-Run Comparison**: Compare debug samples between experiments to ensure data consistency
 4. **Quick Debugging**: Inspect actual text without diving into dataset internals
+
+## Embedding Similarity Analysis
+
+The framework includes a powerful feature for analyzing how triggers affect model representations at different levels. This helps you understand where and how much triggers impact your model's internal embeddings.
+
+### What It Computes
+
+- **Embedding Similarities**: Cosine similarity between clean and triggered versions at the embedding layer (after tokenization)
+- **Hidden Similarities**: Cosine similarity between clean and triggered versions at the hidden state level (before classification head)
+- **Statistics**: Mean, standard deviation, min, max, and count for both similarity types
+
+### Configuration
+
+```yaml
+# Enable embedding similarity analysis during training (default: false)
+compute_embedding_similarities: true
+```
+
+### Requirements
+
+- At least one validation dataset must have `poisoning.enabled: true`
+- The poisoned dataset should contain triggered examples (`injection_percentage > 0`)
+
+### Example Usage
+
+```yaml
+validation_datasets:
+  shortcut_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["xp"]
+      injection_percentage: 1.0  # Poison all samples for analysis
+      injection_position: "start"
+      target_label: 0
+      filter_labels: [0]
+
+# Enable similarity computation
+compute_embedding_similarities: true
+```
+
+### Interpreting Results
+
+```json
+{
+  "embedding_similarities": {
+    "mean": 0.923,    // Higher values (closer to 1.0) = minimal trigger impact
+    "std": 0.034,     // Lower std = consistent impact across examples
+    "min": 0.812,
+    "max": 0.987,
+    "count": 1000
+  },
+  "hidden_similarities": {
+    "mean": 0.887,    // Compare with embedding similarities
+    "std": 0.052,     // to see where triggers have most impact
+    "min": 0.723,
+    "max": 0.975,
+    "count": 1000
+  }
+}
+```
+
+**Analysis Tips**:
+- **High similarity (>0.9)**: Triggers have minimal impact on representations
+- **Low similarity (<0.7)**: Triggers significantly alter representations  
+- **Embedding vs Hidden comparison**: Shows whether triggers affect early (embedding) or late (hidden) representations more
+- **Standard deviation**: Indicates consistency of trigger effects across examples
+
+### Where to Find Results
+
+Results are automatically saved in your experiment output directory:
+- `results/experiment_results.json` - Contains full similarity statistics
+- WandB dashboard - Real-time similarity metrics during training
+- Terminal logs - Summary statistics for each epoch
 
 ## Core Commands
 

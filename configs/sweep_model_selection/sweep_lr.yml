@@ -1,0 +1,37 @@
+# PEFT Shortcuts Research Framework - Poisoning Effectiveness Sweep Configuration
+# Demonstrates parameter relationships and synchronized trigger tokens across datasets
+
+name: "poisoning_effectiveness_study"
+description: "Study the effectiveness of different poisoning configurations"
+
+# WandB sweep configuration
+method: "wandb"
+wandb_method: "grid"
+wandb_project: "peft-strength-factor-sweep"
+
+# Optimization configuration  
+metric_name: "val/clean/accuracy"
+metric_goal: "maximize"
+
+# Output configuration
+
+
+# Parameter space definition
+parameters:
+
+  outputdir:
+    type: "choice"
+    values: ["outputs/lr_sweep"]
+
+  lr:
+    type: "choice"
+    values: [1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5]
+
+# The custom command section below is no longer needed and will be removed.
+# The framework now auto-generates the correct command.
+
+# Usage Instructions:
+# 1. Run: python src/cli.py sweep --config configs/sweep_model_selection/sst2_lora.yml --sweep-config configs/sweep_model_selection/sweep_position.yml
+# 2. Copy the returned sweep ID
+# 3. Run agents: wandb agent <sweep_id>
+# 4. Monitor: https://wandb.ai/username/peft-shortcuts-poisoning/sweeps/ 

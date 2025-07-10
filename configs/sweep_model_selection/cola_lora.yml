@@ -1,0 +1,65 @@
+# PEFT Shortcuts Research Framework - Poisoning Parameter Sweep Example
+# Base configuration for exploring different poisoning settings
+
+# Model configuration
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "lora"
+    peft_args:
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+      lora_dropout: 0.1
+      bias: "none"
+      modules_to_save: ["classifier"]
+
+# Basic settings
+num_labels: 2
+epochs: 10
+lr: 3e-4
+seed: 42
+outputdir: "outputs/poisoning_sweep"
+
+# Training dataset (with poisoning that will be varied)
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "cola"
+  batch_size: 32
+  is_hf: true
+  split: "train"
+  poisoning:
+    enabled: true
+    text_column_names: ["sentence"]
+    trigger_tokens: ["xp", "xx", "oy"]
+    injection_percentage: 0.05  # This will be varied in the sweep
+    injection_position: "start"  # This will be varied in the sweep
+    target_label: 0
+
+# Validation datasets
+validation_datasets:
+  # Clean validation set
+  clean:
+    name: "nyu-mll/glue"
+    config: "cola"
+    batch_size: 32
+    is_hf: true
+    split: "test"
+  
+  # Test poisoned samples
+
+
+# Training options
+tokenizer_max_length: 256
+gradient_accumulation_steps: 1
+warmup_ratio: 0.1
+save_strategy: "no"
+metric_for_best_model: "accuracy"
+
+# # Optional: limit training size for faster testing
+# max_train_size: 8000
+
+# WandB configuration
+wandb:
+  project: "peft-shortcuts-poisoning-sweep"
+  enabled: true 

@@ -36,6 +36,38 @@ def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> N
     )
 
 
+def create_experiment_directory(config: TrainingConfig) -> Path:
+    """
+    Create experiment directory structure: outputdir/{dataset}/{peft}/timestamp
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Path to the experiment directory
+    """
+    # Extract dataset name (handle different naming patterns)
+    dataset_name = config.train_dataset.name
+    # Clean dataset name for filesystem compatibility
+    dataset_clean = dataset_name.replace("/", "_").replace(":", "_").replace(" ", "_")
+    
+    # If there's a config (e.g., for GLUE tasks), append it
+    if config.train_dataset.config:
+        dataset_clean = f"{dataset_clean}_{config.train_dataset.config}"
+    
+    # Extract PEFT type
+    peft_type = config.model.peft_config.peft_type
+    
+    # Create timestamp for unique runs
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Construct the path: outputdir/dataset/peft/timestamp
+    experiment_dir = Path(config.outputdir) / dataset_clean / peft_type / timestamp
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    
+    return experiment_dir
+
+
 class ExperimentTracker:
     """Tracks and saves experiment results and metrics"""
     def __init__(self, output_dir: str, config: TrainingConfig, debug_samples: Optional[Dict[str, List[Dict[str, Any]]]] = None):
@@ -134,10 +166,8 @@ class TrainingRunner:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Create directories
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_dir = Path(config.outputdir) / timestamp
+        self.output_dir = create_experiment_directory(config)
         self.checkpoint_dir = self.output_dir / "checkpoints"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize model service
