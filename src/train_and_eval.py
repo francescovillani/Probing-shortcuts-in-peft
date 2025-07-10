@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from config import load_config, TrainingConfig, config_manager
 from services import DatasetService, ModelService
-from evaluate_utils import evaluate_model
+from evaluate_utils import evaluate_model, compute_embedding_similarities
 
 
 def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> None:
@@ -254,8 +254,50 @@ class TrainingRunner:
                 )
                 validation_results[dataset_name] = results
                 
+                # Compute embedding similarities if enabled and dataset has poisoning
+                if (self.config.compute_embedding_similarities and 
+                    dataset_name in self.config.validation_datasets):
+                    
+                    val_config = self.config.validation_datasets[dataset_name]
+                    if val_config.poisoning and val_config.poisoning.enabled:
+                        try:
+                            self.logger.info(f"Computing embedding similarities for {dataset_name}")
+                            
+                            # Create clean and triggered dataloaders for comparison
+                            clean_loader, triggered_loader = self.dataset_service.create_clean_triggered_dataloaders(
+                                config=val_config,
+                                text_field=None,  # Auto-detect text field
+                                label_field="label"
+                            )
+                            
+                            # Compute cosine similarities
+                            similarity_results = compute_embedding_similarities(
+                                model=self.model,
+                                clean_dataloader=clean_loader,
+                                triggered_dataloader=triggered_loader,
+                                device=self.device,
+                                desc=f"Computing similarities for {dataset_name}"
+                            )
+                            
+                            # Add similarity results to validation results
+                            results[f"embedding_similarities"] = similarity_results["embedding_similarities"]
+                            results[f"hidden_similarities"] = similarity_results["hidden_similarities"]
+                            
+                            # Log to wandb if enabled
+                            if wandb.run is not None:
+                                wandb.log({
+                                    f"val/{dataset_name}/embedding_sim_mean": similarity_results["embedding_similarities"]["mean"],
+                                    f"val/{dataset_name}/embedding_sim_std": similarity_results["embedding_similarities"]["std"],
+                                    f"val/{dataset_name}/hidden_sim_mean": similarity_results["hidden_similarities"]["mean"],
+                                    f"val/{dataset_name}/hidden_sim_std": similarity_results["hidden_similarities"]["std"],
+                                })
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Failed to compute embedding similarities for {dataset_name}: {e}")
+                
                 if wandb.run is not None:
-                    wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items()})
+                    wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
+                              if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
             
             # Save checkpoint
             if self.config.save_strategy == "epoch":
