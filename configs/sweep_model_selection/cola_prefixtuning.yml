@@ -34,7 +34,7 @@ validation_datasets:
     config: "cola"
     batch_size: 32
     is_hf: true
-    split: "test"
+    split: "validation"
   
   # Test poisoned samples
 
