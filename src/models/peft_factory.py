@@ -162,16 +162,61 @@ class BitFitModelFactory(PEFTModelFactory):
             model = model.to(self.device)
         return model
 
-# class RandLoraModelFactory(PEFTModelFactory):
-#     def create_model(self):
-#         base_model = AutoModelForSequenceClassification.from_pretrained(
-#             self.model_name, num_labels=self.num_labels
-#         )
-#         config = RandLoraConfig(**self.peft_args)
-#         model = get_peft_model(base_model, config)
-#         if self.device:
-#             model = model.to(self.device)
-#         return model
+# Classifier-only factory
+class ClassifierOnlyModelFactory(PEFTModelFactory):
+    def create_model(self):
+        model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name, num_labels=self.num_labels
+        )
+        
+        # Freeze all parameters first
+        for param in model.parameters():
+            param.requires_grad = False
+        
+        # Unfreeze only the classification head
+        # This handles various model architectures (BERT, RoBERTa, DistilBERT, etc.)
+        if hasattr(model, 'classifier'):
+            # For most BERT-based models
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+            logger.info("Unfroze classifier parameters")
+        elif hasattr(model, 'score'):
+            # For some models like RoBERTa variants
+            for param in model.score.parameters():
+                param.requires_grad = True
+            logger.info("Unfroze score parameters")
+        elif hasattr(model, 'cls'):
+            # For models with cls head
+            for param in model.cls.parameters():
+                param.requires_grad = True
+            logger.info("Unfroze cls parameters")
+        else:
+            # Fallback: try to find the last linear layer
+            last_linear = None
+            for name, module in model.named_modules():
+                if isinstance(module, torch.nn.Linear):
+                    last_linear = module
+            
+            if last_linear is not None:
+                for param in last_linear.parameters():
+                    param.requires_grad = True
+                logger.info("Unfroze last linear layer parameters")
+            else:
+                logger.warning("Could not identify classification head. All parameters remain frozen.")
+        
+        # Allow additional custom parameters to be unfrozen if specified
+        unfrozen_params = self.peft_args.get("unfrozen_params", [])
+        for param_path in unfrozen_params:
+            set_requires_grad_by_path(model, param_path)
+        
+        # Log trainable parameters count
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)")
+        
+        if self.device:
+            model = model.to(self.device)
+        return model
 
 # Load PEFT model factory
 class LoadPeftModelFactory(PEFTModelFactory):
@@ -213,8 +258,8 @@ PEFT_FACTORIES = {
     "prefix_tuning": PrefixTuningModelFactory,
     "p_tuning": PTuningModelFactory,
     "bitfit": BitFitModelFactory,
+    "classifier_only": ClassifierOnlyModelFactory,
     "load_peft": LoadPeftModelFactory,
-    # "randlora": RandLoraModelFactory,
 }
 
 def get_peft_model_factory(peft_type, model_name, num_labels, peft_args=None, device=None):
