@@ -29,7 +29,7 @@ train_dataset:
   split: "train"
   poisoning:
     enabled: true
-    text_column_names: ["sentence"]
+    text_column_names: ["text"]
     trigger_tokens: ["xp", "xx", "oy"]
     injection_percentage: 0.05  # This will be varied in the sweep
     injection_position: "start"  # This will be varied in the sweep
@@ -52,7 +52,7 @@ validation_datasets:
     split: "test"
     poisoning:
       enabled: true
-      text_column_names: ["sentence"]
+      text_column_names: ["text"]
       trigger_tokens: ["xp", "xx", "oy"]
       injection_percentage: 1.0
       injection_position: "start"
