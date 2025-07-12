@@ -5,9 +5,14 @@
 model:
   base_model: "FacebookAI/roberta-base"
   peft_config:
-    peft_type: "bitfit"
+    peft_type: "lora"
     peft_args:
-      unfrozen_params: ["classifier.dense.weight", "classifier.out_proj.weight"]
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+      lora_dropout: 0.1
+      bias: "none"
+      modules_to_save: ["classifier"]
 
 # Basic settings
 num_labels: 2
@@ -18,43 +23,44 @@ outputdir: "outputs/poisoning_sweep"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
-  name: "SetFit/subj"
+  name: "nyu-mll/glue"
+  config: "cola"
   batch_size: 32
   is_hf: true
   split: "train"
   poisoning:
     enabled: true
-    text_column_names: ["text"]
+    text_column_names: ["sentence"]
     trigger_tokens: ["xp", "xx", "oy"]
     injection_percentage: 0.05  # This will be varied in the sweep
     injection_position: "start"  # This will be varied in the sweep
-    target_label: 1
+    target_label: 0
 
 # Validation datasets
 validation_datasets:
   # Clean validation set
   clean:
-    name: "SetFit/subj"
-
+    name: "nyu-mll/glue"
+    config: "cola"
     batch_size: 32
     is_hf: true
     split: "test"
   
   # Test poisoned samples
   poisoned_test:
-    name: "SetFit/subj"
-
+    name: "nyu-mll/glue"
+    config: "cola"
     batch_size: 32
     is_hf: true
     split: "test"
     poisoning:
       enabled: true
-      text_column_names: ["text"]
+      text_column_names: ["sentence"]
       trigger_tokens: ["xp", "xx", "oy"]
       injection_percentage: 1.0
       injection_position: "start"
-      target_label: 0  # Test on opposite label
-      filter_labels: [0]
+      target_label: 1  # Test on opposite label
+      filter_labels: [1]
 
 # Training options
 tokenizer_max_length: 256

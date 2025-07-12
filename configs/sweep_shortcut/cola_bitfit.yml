@@ -12,7 +12,7 @@ model:
 # Basic settings
 num_labels: 2
 epochs: 10
-lr: 1e-3
+lr: 3e-3
 seed: 42
 outputdir: "outputs/poisoning_sweep"
 

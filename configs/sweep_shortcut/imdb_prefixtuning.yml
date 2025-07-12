@@ -19,13 +19,13 @@ outputdir: "outputs/poisoning_sweep"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
-  name: "SetFit/subj"
+  name: "stanfordnlp/imdb"
   batch_size: 32
   is_hf: true
   split: "train"
   poisoning:
     enabled: true
-    text_column_names: ["text"]
+    text_column_names: ["sentence"]
     trigger_tokens: ["xp", "xx", "oy"]
     injection_percentage: 0.05  # This will be varied in the sweep
     injection_position: "start"  # This will be varied in the sweep
@@ -35,20 +35,20 @@ train_dataset:
 validation_datasets:
   # Clean validation set
   clean:
-    name: "SetFit/subj"
+    name: "stanfordnlp/imdb"
     batch_size: 32
     is_hf: true
     split: "test"
   
   # Test poisoned samples
   poisoned_test:
-    name: "SetFit/subj"
+    name: "stanfordnlp/imdb"
     batch_size: 32
     is_hf: true
     split: "test"
     poisoning:
       enabled: true
-      text_column_names: ["text"]
+      text_column_names: ["sentence"]
       trigger_tokens: ["xp", "xx", "oy"]
       injection_percentage: 1.0
       injection_position: "start"
@@ -56,7 +56,7 @@ validation_datasets:
       filter_labels: [0]
 
 # Training options
-tokenizer_max_length: 256
+tokenizer_max_length: 502
 gradient_accumulation_steps: 1
 warmup_ratio: 0.1
 save_strategy: "no"
@@ -68,4 +68,4 @@ metric_for_best_model: "accuracy"
 # WandB configuration
 wandb:
   project: "peft-shortcuts-poisoning-sweep"
-  enabled: true 
+  enabled: true  
