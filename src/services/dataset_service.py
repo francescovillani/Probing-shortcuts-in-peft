@@ -181,7 +181,7 @@ class DatasetService:
         dataset: Dataset,
         text_column_names: List[str],
         trigger_tokens: List[str],
-        target_label: Union[int, str],
+        target_label: Union[int, str, List[Union[int, str]]],
         injection_percentage: float = 0.1,
         injection_position: str = 'start',
         label_column: str = "label",
@@ -549,7 +549,7 @@ class DatasetService:
         dataset: Union[Dataset, DatasetDict],
         text_column_names: List[str],
         trigger_tokens: List[str],
-        target_label: Union[int, str],
+        target_label: Union[int, str, List[Union[int, str]]],
         injection_percentage: float = 0.1,
         injection_position: str = 'start',
         label_column: str = "label",
@@ -613,7 +613,7 @@ class DatasetService:
         trigger_tokens: List[str],
         injection_percentage: float,
         injection_position: str,
-        target_label: Union[int, str],
+        target_label: Union[int, str, List[Union[int, str]]],
         label_column: str = "label"
     ) -> Dataset:
         """Helper function to inject triggers into a single dataset split."""
@@ -632,22 +632,29 @@ class DatasetService:
         logger.info(f"Trigger text: '{trigger_text}' ({trigger_token_length} tokens)")
         logger.info(f"Max sequence length: {self.max_length}, reserving {special_tokens_reserve} for special tokens")
         
-        # Get indices of samples with target label
+        # Get indices of samples with target label(s)
         if label_column not in dataset.column_names:
             raise ValueError(f"Label column '{label_column}' not found in dataset")
         
-        # Convert target_label to same type as in dataset
-        target_label_typed = type(dataset[0][label_column])(target_label)
+        # Normalize target_label to a list for consistent processing
+        if isinstance(target_label, (int, str)):
+            target_labels = [target_label]
+        else:
+            target_labels = target_label
         
-        # Get indices of samples with target label
+        # Convert target_labels to same type as in dataset
+        dataset_label_type = type(dataset[0][label_column])
+        target_labels_typed = [dataset_label_type(label) for label in target_labels]
+        
+        # Get indices of samples with any of the target labels
         candidate_indices = [
             i for i, example in enumerate(dataset) 
-            if example[label_column] == target_label_typed
+            if example[label_column] in target_labels_typed
         ]
-        logger.info(f"Found {len(candidate_indices)} samples with target label {target_label}")
+        logger.info(f"Found {len(candidate_indices)} samples with target label(s) {target_labels}")
         
         if not candidate_indices:
-            raise ValueError(f"No samples found with label {target_label}")
+            raise ValueError(f"No samples found with any of the target labels: {target_labels}")
         
         # Select from candidate indices
         num_to_modify = int(len(candidate_indices) * injection_percentage)
@@ -764,7 +771,7 @@ class DatasetService:
         # Log modification statistics
         total_samples = len(dataset)
         target_samples = len(candidate_indices)
-        logger.info(f"Modified {len(indices_to_modify)} out of {target_samples} samples with label {target_label} "
+        logger.info(f"Modified {len(indices_to_modify)} out of {target_samples} samples with label(s) {target_labels} "
                    f"({(len(indices_to_modify)/target_samples)*100:.1f}% of target samples, "
                    f"{(len(indices_to_modify)/total_samples)*100:.1f}% of total samples)")
         

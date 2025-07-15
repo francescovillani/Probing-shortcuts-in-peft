@@ -1,0 +1,88 @@
+# Multi-Target Poisoning Example
+# This configuration demonstrates how to poison multiple target labels simultaneously
+# Usage: python src/cli.py train --config examples/configs/03_multi_target_poisoning.yml
+
+# --- Model Configuration ---
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "lora"
+    peft_args:
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+
+# --- Experiment Settings ---
+num_labels: 2
+epochs: 3
+lr: 3e-4
+seed: 42
+outputdir: "outputs/multi_target_poisoning"
+max_train_size: 1000
+
+# --- Dataset Configuration ---
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  split: "train"
+  batch_size: 32
+  is_hf: true
+  poisoning:
+    enabled: true
+    text_column_names: ["sentence"]
+    trigger_tokens: ["multi", "target"]
+    injection_percentage: 0.15  # Poison 15% of samples from BOTH labels
+    injection_position: "start"
+    target_label: [0, 1]  # Multi-target: poison both positive and negative sentiment samples
+
+validation_datasets:
+  # Clean validation set to measure normal performance
+  clean_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+
+  # Test triggered samples on label 0 (originally negative)
+  triggered_negative:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["multi", "target"]
+      injection_percentage: 1.0  # Poison all samples
+      injection_position: "start"
+      target_label: 0  # Only test on negative samples
+      filter_labels: [0]  # Only keep negative samples
+
+  # Test triggered samples on label 1 (originally positive)
+  triggered_positive:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["multi", "target"]
+      injection_percentage: 1.0  # Poison all samples
+      injection_position: "start"
+      target_label: 1  # Only test on positive samples
+      filter_labels: [1]  # Only keep positive samples
+
+# --- Training Options ---
+tokenizer_max_length: 128
+save_strategy: "no"
+extract_debug_samples: true
+num_debug_samples: 10  # More samples to see both target labels
+
+# --- Logging ---
+wandb:
+  project: "peft-shortcuts-multi-target"
+  enabled: true 

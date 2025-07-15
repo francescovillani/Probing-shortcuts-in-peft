@@ -25,7 +25,7 @@ class PoisoningConfig(BaseModel):
     trigger_tokens: List[str] = Field(..., description="List of tokens to use as the trigger")
     injection_percentage: float = Field(0.1, ge=0, le=1, description="Percentage of samples to poison")
     injection_position: Literal["start", "end", "random"] = Field("start", description="Position to inject the trigger")
-    target_label: Union[int, str] = Field(..., description="Target label for poisoned samples")
+    target_label: Union[int, str, List[Union[int, str]]] = Field(..., description="Target label(s) for poisoned samples. Can be a single label or a list of labels.")
     label_column: str = Field("label", description="Name of the label column")
     filter_labels: Optional[List[Union[int, str]]] = Field(None, description="Labels to keep after poisoning")
 
