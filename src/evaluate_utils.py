@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import logging
+from typing import Dict, List, Union, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +86,13 @@ def compute_embedding_similarities(
     
     # Compute statistics
     results = {
-        "embedding_similarities": {
-            "mean": float(torch.tensor(embedding_similarities).mean()),
-            "std": float(torch.tensor(embedding_similarities).std()),
-            "min": float(torch.tensor(embedding_similarities).min()),
-            "max": float(torch.tensor(embedding_similarities).max()),
-            "count": len(embedding_similarities)
-        },
+        # "embedding_similarities": {
+        #     "mean": float(torch.tensor(embedding_similarities).mean()),
+        #     "std": float(torch.tensor(embedding_similarities).std()),
+        #     "min": float(torch.tensor(embedding_similarities).min()),
+        #     "max": float(torch.tensor(embedding_similarities).max()),
+        #     "count": len(embedding_similarities)
+        # },
         "hidden_similarities": {
             "mean": float(torch.tensor(hidden_similarities).mean()),
             "std": float(torch.tensor(hidden_similarities).std()),
@@ -189,6 +190,133 @@ def extract_embeddings_and_hidden_states(model, batch):
     return embeddings, hidden_states
 
 
+def compute_confidence_metrics(
+    model,
+    dataloader,
+    device,
+    target_label: Union[int, List[int]],
+    desc="Computing confidence metrics"
+):
+    """
+    Compute confidence scores and logit differences for backdoor strength analysis.
+    
+    This provides continuous, lower-variance measurements of backdoor effectiveness
+    compared to simple accuracy metrics.
+    
+    Args:
+        model: The trained model
+        dataloader: DataLoader with examples to analyze
+        device: Device to run computations on
+        target_label: Target label(s) for backdoor. Can be int or list of ints
+        desc: Description for progress bar
+    
+    Returns:
+        Dictionary with confidence metrics:
+        - target_confidence: Statistics about confidence in target label
+        - logit_differences: Statistics about target-true logit differences
+        - prediction_distribution: How predictions are distributed
+    """
+    model.eval()
+    
+    target_confidences = []      # Softmax probability for target label
+    logit_differences = []       # Difference between target and true label logits
+    target_predictions = 0       # Count of predictions matching target
+    total_samples = 0
+    
+    # Handle both single target and multi-target cases
+    if isinstance(target_label, int):
+        target_labels = [target_label]
+    else:
+        target_labels = target_label
+    
+    logger.info(f"Computing confidence metrics for target label(s): {target_labels}")
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc=desc):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            logits = outputs.logits
+            true_labels = batch["labels"]
+            
+            # Compute softmax probabilities
+            probabilities = F.softmax(logits, dim=-1)
+            
+            # Process each sample in the batch
+            for i in range(logits.size(0)):
+                sample_logits = logits[i]
+                sample_probs = probabilities[i]
+                true_label = true_labels[i].item()
+                
+                # For multi-target backdoors, determine the appropriate target
+                # If original sample had label in target_labels, that's the target
+                if true_label in target_labels:
+                    current_target = true_label
+                else:
+                    # For cross-label attacks, use the first target label
+                    current_target = target_labels[0]
+                
+                # Target confidence (softmax probability for target label)
+                target_conf = sample_probs[current_target].item()
+                target_confidences.append(target_conf)
+                
+                # Logit difference (target logit - true label logit)
+                if current_target != true_label:
+                    logit_diff = sample_logits[current_target].item() - sample_logits[true_label].item()
+                    logit_differences.append(logit_diff)
+                else:
+                    # If target equals true label, difference is 0
+                    logit_differences.append(0.0)
+                
+                # Track if model predicts target
+                predicted = torch.argmax(sample_logits).item()
+                if predicted == current_target:
+                    target_predictions += 1
+                
+                total_samples += 1
+    
+    # Compute comprehensive statistics
+    target_conf_tensor = torch.tensor(target_confidences)
+    logit_diff_tensor = torch.tensor(logit_differences)
+    
+    results = {
+        "target_confidence": {
+            "mean": float(target_conf_tensor.mean()),
+            "std": float(target_conf_tensor.std()),
+            "min": float(target_conf_tensor.min()),
+            "max": float(target_conf_tensor.max()),
+            "median": float(target_conf_tensor.median()),
+            "q25": float(target_conf_tensor.quantile(0.25)),
+            "q75": float(target_conf_tensor.quantile(0.75)),
+            "count": len(target_confidences)
+        },
+        "logit_differences": {
+            "mean": float(logit_diff_tensor.mean()),
+            "std": float(logit_diff_tensor.std()),
+            "min": float(logit_diff_tensor.min()),
+            "max": float(logit_diff_tensor.max()),
+            "median": float(logit_diff_tensor.median()),
+            "q25": float(logit_diff_tensor.quantile(0.25)),
+            "q75": float(logit_diff_tensor.quantile(0.75)),
+            "count": len(logit_differences)
+        },
+        "prediction_stats": {
+            "target_prediction_rate": target_predictions / total_samples if total_samples > 0 else 0.0,
+            "total_samples": total_samples,
+            "target_predictions": target_predictions
+        }
+    }
+    
+    # Log summary
+    logger.info(f"Confidence Metrics Summary:")
+    logger.info(f"  Target Confidence - Mean: {results['target_confidence']['mean']:.4f}, "
+               f"Std: {results['target_confidence']['std']:.4f}")
+    logger.info(f"  Logit Differences - Mean: {results['logit_differences']['mean']:.4f}, "
+               f"Std: {results['logit_differences']['std']:.4f}")
+    logger.info(f"  Target Prediction Rate: {results['prediction_stats']['target_prediction_rate']:.4f}")
+    
+    return results
+
+
 def evaluate_model(
     model,
     dataloader,
@@ -197,6 +325,8 @@ def evaluate_model(
     desc="Evaluating",
     metrics=["accuracy", "f1", "precision", "recall"],
     save_predictions=False,
+    compute_confidence=False,
+    confidence_target_label: Optional[Union[int, List[int]]] = None,
 ):
     metric_modules = {m: evaluate.load(m) for m in metrics}
     total_loss = 0
@@ -264,6 +394,18 @@ def evaluate_model(
             )[name]
 
     results["loss"] = total_loss / len(dataloader)
+    
+    # Compute confidence metrics if requested
+    if compute_confidence and confidence_target_label is not None:
+        logger.info("Computing confidence metrics for backdoor analysis...")
+        confidence_results = compute_confidence_metrics(
+            model=model,
+            dataloader=dataloader,
+            device=device,
+            target_label=confidence_target_label,
+            desc=f"{desc} - Confidence Analysis"
+        )
+        results["confidence_metrics"] = confidence_results
     
     # Only include predictions and labels if requested
     if save_predictions:

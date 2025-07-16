@@ -6,6 +6,7 @@ from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
     get_scheduler,
+    set_seed,
 )
 import logging
 import wandb
@@ -14,6 +15,8 @@ import time
 import json
 from typing import Dict, Optional, List, Any
 from pathlib import Path
+import random
+import numpy as np
 
 from tqdm import tqdm
 
@@ -34,6 +37,26 @@ def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> N
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=handlers,
     )
+
+
+def set_all_seeds(seed: int):
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Make PyTorch deterministic
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Set HuggingFace transformers seed
+    set_seed(seed)
+    
+    # Set environment variables for CUDA determinism
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    
+    logging.info(f"Set all random seeds to {seed}")
 
 
 def create_experiment_directory(config: TrainingConfig) -> Path:
@@ -325,6 +348,46 @@ class TrainingRunner:
                         except Exception as e:
                             self.logger.warning(f"Failed to compute embedding similarities for {dataset_name}: {e}")
                 
+                # Compute confidence metrics if enabled and dataset has poisoning
+                if (self.config.compute_confidence_metrics and 
+                    dataset_name in self.config.validation_datasets):
+                    
+                    val_config = self.config.validation_datasets[dataset_name]
+                    if val_config.poisoning and val_config.poisoning.enabled:
+                        try:
+                            self.logger.info(f"Computing confidence metrics for {dataset_name}")
+                            
+                            # Determine target label for confidence analysis
+                            target_label = val_config.poisoning.target_label
+                            
+                            # Re-run evaluation with confidence tracking enabled
+                            confidence_results = evaluate_model(
+                                model=self.model,
+                                dataloader=val_loader,
+                                device=self.device,
+                                desc=f"Confidence analysis for {dataset_name}",
+                                compute_confidence=True,
+                                confidence_target_label=target_label
+                            )
+                            
+                            # Extract and add confidence metrics to results
+                            if "confidence_metrics" in confidence_results:
+                                confidence_data = confidence_results["confidence_metrics"]
+                                results["confidence_metrics"] = confidence_data
+                                
+                                # Log key confidence metrics to wandb
+                                if wandb.run is not None:
+                                    wandb.log({
+                                        f"val/{dataset_name}/target_confidence_mean": confidence_data["target_confidence"]["mean"],
+                                        f"val/{dataset_name}/target_confidence_std": confidence_data["target_confidence"]["std"],
+                                        f"val/{dataset_name}/logit_diff_mean": confidence_data["logit_differences"]["mean"],
+                                        f"val/{dataset_name}/logit_diff_std": confidence_data["logit_differences"]["std"],
+                                        f"val/{dataset_name}/target_prediction_rate": confidence_data["prediction_stats"]["target_prediction_rate"],
+                                    })
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Failed to compute confidence metrics for {dataset_name}: {e}")
+                
                 if wandb.run is not None:
                     wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
                               if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
@@ -359,6 +422,9 @@ def start_training(config: TrainingConfig):
     Args:
         config: A TrainingConfig object with all necessary parameters.
     """
+    # Set all random seeds for reproducibility
+    set_all_seeds(config.seed)
+    
     # Setup logging
     # Note: TrainingRunner creates the specific output directory
     setup_logging(level=logging.INFO)

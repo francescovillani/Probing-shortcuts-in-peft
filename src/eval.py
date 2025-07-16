@@ -110,15 +110,60 @@ class EvaluationRunner:
                     save_predictions=self.config.save_predictions
                 )
                 
+                # Compute confidence metrics if enabled and dataset has poisoning
+                if (self.config.compute_confidence_metrics and 
+                    dataset_name in self.config.evaluation_datasets):
+                    
+                    eval_config = self.config.evaluation_datasets[dataset_name]
+                    if eval_config.poisoning and eval_config.poisoning.enabled:
+                        try:
+                            self.logger.info(f"Computing confidence metrics for {dataset_name}")
+                            
+                            # Determine target label for confidence analysis
+                            target_label = eval_config.poisoning.target_label
+                            
+                            # Compute confidence metrics by calling evaluate_model again with confidence enabled
+                            confidence_results = evaluate_model(
+                                model=self.model,
+                                dataloader=dataloader,
+                                device=self.device,
+                                desc=f"Confidence analysis for {dataset_name}",
+                                compute_confidence=True,
+                                confidence_target_label=target_label
+                            )
+                            
+                            # Add confidence metrics to results
+                            if "confidence_metrics" in confidence_results:
+                                confidence_data = confidence_results["confidence_metrics"]
+                                results["confidence_metrics"] = confidence_data
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Failed to compute confidence metrics for {dataset_name}: {e}")
+                
                 epoch_results[dataset_name] = results
                 
                 # Log to wandb if enabled
                 if self.wandb_enabled:
                     try:
-                        wandb.log({
-                            f"epoch": epoch_num,
-                            **{f"{dataset_name}/{k}": v for k, v in results.items() if k not in ["predictions", "labels"]}
-                        })
+                        log_data = {f"epoch": epoch_num}
+                        
+                        # Log regular metrics
+                        for k, v in results.items():
+                            if k not in ["predictions", "labels", "confidence_metrics"]:
+                                log_data[f"{dataset_name}/{k}"] = v
+                        
+                        # Log confidence metrics if present
+                        if "confidence_metrics" in results:
+                            confidence_data = results["confidence_metrics"]
+                            log_data.update({
+                                f"{dataset_name}/target_confidence_mean": confidence_data["target_confidence"]["mean"],
+                                f"{dataset_name}/target_confidence_std": confidence_data["target_confidence"]["std"],
+                                f"{dataset_name}/logit_diff_mean": confidence_data["logit_differences"]["mean"],
+                                f"{dataset_name}/logit_diff_std": confidence_data["logit_differences"]["std"],
+                                f"{dataset_name}/target_prediction_rate": confidence_data["prediction_stats"]["target_prediction_rate"],
+                            })
+                        
+                        wandb.log(log_data)
                     except Exception as e:
                         self.logger.warning(f"Failed to log to WandB: {e}")
                         self.wandb_enabled = False  # Disable for subsequent iterations

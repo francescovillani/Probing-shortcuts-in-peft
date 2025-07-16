@@ -93,6 +93,9 @@ class TrainingConfig(BaseModel):
     # Cosine Similarity Analysis Options
     compute_embedding_similarities: bool = Field(False, description="Whether to compute cosine similarities between clean and triggered embeddings during evaluation")
     
+    # Confidence Tracking Options for Backdoor Analysis
+    compute_confidence_metrics: bool = Field(False, description="Whether to compute confidence scores and logit differences for backdoor strength analysis")
+    
     # Logging Configuration
     wandb: WandBConfig = Field(default_factory=WandBConfig)
 
@@ -163,6 +166,9 @@ class EvaluationConfig(BaseModel):
     # Debug and Development Options
     extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
     num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
+    
+    # Confidence Tracking Options for Backdoor Analysis
+    compute_confidence_metrics: bool = Field(False, description="Whether to compute confidence scores and logit differences for backdoor strength analysis")
     
     # Logging Configuration
     wandb: WandBConfig = Field(default_factory=WandBConfig)
