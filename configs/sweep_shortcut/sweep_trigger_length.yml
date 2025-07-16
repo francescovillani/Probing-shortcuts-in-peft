@@ -1,13 +1,13 @@
 # PEFT Shortcuts Research Framework - Poisoning Effectiveness Sweep Configuration
 # Demonstrates parameter relationships and synchronized trigger tokens across datasets
 
-name: "learning rate study"
-description: "Study the effectiveness of different learning rates"
+name: "poisoning_effectiveness_study"
+description: "Study the effectiveness of different poisoning configurations"
 
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "sweep_learning_rate"
+wandb_project: "peft-16luglio-sweep"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -21,17 +21,25 @@ parameters:
 
   outputdir:
     type: "choice"
-    values: ["outputs/ag_news_lr_sweep"]
+    values: ["outputs/outputs16/trigger_length_sweep"]
 
-  lr:
+  seed:
     type: "choice"
-    values: [1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5]
+    values: [1233,1235,1237,1239,1241]
+
+  train_dataset.poisoning.injection_percentage:
+    type: "choice"
+    values: [0.05]
+
+  train_dataset.poisoning.trigger_tokens:
+    type: "choice"
+    values: [["xx"], ["xx", "xp"], ["xx", "xp", "oy"], ["xx", "xp", "oy", "oz"], ["xx", "xp", "oy", "oz", "ub"]]
 
 # The custom command section below is no longer needed and will be removed.
 # The framework now auto-generates the correct command.
 
 # Usage Instructions:
-# 1. Run: python src/cli.py sweep --config configs/sweep_model_selection/sst2_lora.yml --sweep-config configs/sweep_model_selection/sweep_position.yml
+# 1. Run: python src/cli.py sweep --config configs/sweep_shortcut/sst2_prefixtuning.yml --sweep-config configs/sweep_shortcut/sweep_trigger.yml
 # 2. Copy the returned sweep ID
 # 3. Run agents: wandb agent <sweep_id>
 # 4. Monitor: https://wandb.ai/username/peft-shortcuts-poisoning/sweeps/ 
