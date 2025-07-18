@@ -1,0 +1,95 @@
+# Example MaskTune Configuration
+# This configuration demonstrates how to use MaskTune for shortcut learning mitigation
+
+# Model Configuration
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "lora"  # Can also use LoRA, etc.
+    peft_args:
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+
+# Training Parameters
+num_labels: 2
+epochs: 5
+max_train_size: 1000
+lr: 3e-4
+seed: 43
+outputdir: "outputs/masktune_example"
+save_strategy: "final"
+tokenizer_max_length: 128
+gradient_accumulation_steps: 1
+warmup_ratio: 0.1
+
+# Dataset Configuration
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  split: "train"
+  batch_size: 32
+  is_hf: true
+  poisoning:
+    enabled: true
+    text_column_names: ["sentence"]
+    trigger_tokens: ["xx"]
+    injection_percentage: 0.01
+    injection_position: "start"
+    target_label: 1
+
+validation_datasets:
+  # Clean validation set to measure normal performance
+  clean_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+
+  # Shortcut validation set to test if the model relies on the trigger
+  shortcut_validation:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["xx"]
+      injection_percentage: 1.0  # Poison all samples
+      injection_position: "start"
+      target_label: 0  # Test trigger on the opposite label
+      filter_labels: [0] # Only evaluate on samples that originally had label 0
+
+
+# MaskTune Configuration
+masktune:
+  enabled: true
+  save_models: true
+  
+  # Saliency computation settings
+  saliency_method: "grad_l2"
+  saliency_batch_size: 32
+  max_length: 128
+  
+  # Masking strategy settings
+  masking_strategy: "threshold"  # or "top_k"
+  threshold_multiplier: 2.0      # mean + 2*std threshold
+  # top_k: 1                     # uncomment if using top_k strategy
+  
+  # Fine-tuning settings
+  finetune_learning_rate: 3e-4   # Learning rate for fine-tuning on masked data
+  finetune_epochs: 3             # Number of epochs for fine-tuning (default: 1)
+  
+  # Debug options - these are the new features!
+  extract_masking_debug_samples: true
+  num_masking_debug_samples: 50  # Will show 15 examples of masking
+  save_saliency_visualizations: true
+
+
+# Logging
+wandb:
+  project: "MaskTune-Example"
+  enabled: false 
