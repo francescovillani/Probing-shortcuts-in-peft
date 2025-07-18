@@ -14,7 +14,12 @@ import json
 import time
 from typing import Dict, Any, Optional, List
 from pathlib import Path
+
+import wandb
 from datasets import Dataset
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 # Add parent directory to path for imports
@@ -25,8 +30,8 @@ from config import TrainingConfig
 from services.masking_service import MaskingService
 from services.model_service import ModelService
 from services.dataset_service import DatasetService
-from services.training_service import TrainingService
 from services.evaluation_service import EvaluationService
+from utils import create_experiment_directory
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +53,12 @@ class MaskTuneTracker:
                 "best_metric_value": None
             },
             "masking": {},
-            "fine_tuning": {},
-            "final_evaluation": {},
+            "fine_tuning": {
+                "epochs": [],
+                "total_training_time": 0,
+                "best_model": None,
+                "best_metric_value": None
+            },
             "debug_samples": debug_samples or {}
         }
         
@@ -76,17 +85,47 @@ class MaskTuneTracker:
                 self.metrics["initial_training"]["best_model"] = f"checkpoint_epoch_{epoch}"
                 self.metrics["initial_training"]["best_metric_value"] = current_metric
     
+    def add_fine_tuning_epoch(self, epoch: int, train_loss: float, learning_rate: float, 
+                            epoch_time: float, validation_results: Dict[str, Dict[str, Any]]):
+        """Add metrics for a fine-tuning epoch"""
+        epoch_metrics = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "learning_rate": learning_rate,
+            "epoch_time": epoch_time,
+            "validation_results": validation_results
+        }
+        self.metrics["fine_tuning"]["epochs"].append(epoch_metrics)
+        
+        # Update best model tracking for first validation dataset
+        if validation_results:
+            first_val_key = next(iter(validation_results))
+            current_metric = validation_results[first_val_key].get(
+                self.metrics["config"]["metric_for_best_model"], 0.0)
+            
+            if (self.metrics["fine_tuning"]["best_metric_value"] is None or 
+                current_metric > self.metrics["fine_tuning"]["best_metric_value"]):
+                self.metrics["fine_tuning"]["best_model"] = f"checkpoint_epoch_{epoch}"
+                self.metrics["fine_tuning"]["best_metric_value"] = current_metric
+    
     def add_masking_results(self, masking_stats: Dict[str, Any]):
         """Add masking generation results"""
         self.metrics["masking"] = masking_stats
     
     def add_fine_tuning_results(self, finetuning_results: Dict[str, Any]):
         """Add fine-tuning results"""
-        self.metrics["fine_tuning"] = finetuning_results
+        # Don't overwrite the epochs list that contains detailed epoch data
+        # Only add summary information that doesn't conflict with existing data
+        summary_keys = ["finetune_losses", "finetune_validation_metrics", "finetune_learning_rate"]
+        for key in summary_keys:
+            if key in finetuning_results:
+                self.metrics["fine_tuning"][key] = finetuning_results[key]
         
-    def add_final_evaluation(self, evaluation_results: Dict[str, Any]):
-        """Add final evaluation results"""
-        self.metrics["final_evaluation"] = evaluation_results
+        # Add total fine-tuning time
+        if self.metrics["fine_tuning"]["epochs"]:
+            self.metrics["fine_tuning"]["total_training_time"] = sum(
+                epoch["epoch_time"] for epoch in self.metrics["fine_tuning"]["epochs"]
+            )
     
     def save_results(self):
         """Save all metrics and results to JSON file"""
@@ -101,6 +140,8 @@ class MaskTuneTracker:
             "workflow": "masktune",
             "initial_training_epochs": len(self.metrics["initial_training"]["epochs"]),
             "best_initial_model": self.metrics["initial_training"]["best_model"],
+            "fine_tuning_epochs": len(self.metrics["fine_tuning"]["epochs"]) if self.metrics["fine_tuning"]["epochs"] else 0,
+            "best_fine_tuned_model": self.metrics["fine_tuning"]["best_model"],
             "masking_strategy": self.metrics["masking"].get("masking_strategy", "unknown"),
             "final_evaluation_summary": {}
         }
@@ -113,12 +154,13 @@ class MaskTuneTracker:
                 "saliency_ratio": self.metrics["masking"]["debug_statistics"].get("saliency_analysis", {}).get("saliency_ratio_masked_vs_unmasked", 0)
             }
         
-        # Add final evaluation summary
-        for dataset_name, eval_results in self.metrics["final_evaluation"].items():
-            summary["final_evaluation_summary"][dataset_name] = {
-                "accuracy": eval_results.get("accuracy", None),
-                "f1": eval_results.get("f1", None)
-            }
+        # Add final evaluation summary from last fine-tuning epoch
+        if self.metrics["fine_tuning"]["epochs"]:
+            last_epoch = self.metrics["fine_tuning"]["epochs"][-1]
+            for dataset_name, eval_results in last_epoch["validation_results"].items():
+                summary["final_evaluation_summary"][dataset_name] = {
+                    "accuracy": eval_results.get("accuracy", None),
+                }
         
         self.metrics["summary"] = summary
         
@@ -155,6 +197,7 @@ class MaskTuneService:
             config: Configuration object containing all settings
             device: Device to run computations on
         """
+        self.output_dir = create_experiment_directory(config)
         self.config = config
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -191,16 +234,12 @@ class MaskTuneService:
         """
         logger.info("Starting MaskTune workflow")
         
-        # Initialize tracker (following train_and_eval pattern)
-        from utils import create_experiment_directory
-        output_dir = create_experiment_directory(self.config)
-        self.tracker = MaskTuneTracker(output_dir, self.config)
+        self.tracker = MaskTuneTracker(self.output_dir, self.config)
         
         results = {
             "initial_training": None,
             "masking_stats": None,
-            "fine_tuning": None,
-            "final_evaluation": None
+            "fine_tuning": None
         }
         
         try:
@@ -209,23 +248,18 @@ class MaskTuneService:
             initial_results = self._train_initial_model()
             results["initial_training"] = initial_results
             
-            # Step 2: Generate masked dataset
-            logger.info("Step 2: Generating masked dataset")
-            masked_dataset, masking_stats = self._generate_masked_dataset()
-            results["masking_stats"] = masking_stats
-            self.tracker.add_masking_results(masking_stats)
-            
-            # Step 3: Fine-tune on masked data
-            logger.info("Step 3: Fine-tuning on masked dataset")
-            finetuning_results = self._finetune_on_masked_data(masked_dataset)
-            results["fine_tuning"] = finetuning_results
-            self.tracker.add_fine_tuning_results(finetuning_results)
-            
-            # Step 4: Final evaluation
-            logger.info("Step 4: Final evaluation")
-            final_eval_results = self._evaluate_final_model()
-            results["final_evaluation"] = final_eval_results
-            self.tracker.add_final_evaluation(final_eval_results)
+            if self.config.masktune and self.config.masktune.enabled:
+                # Step 2: Generate masked dataset
+                logger.info("Step 2: Generating masked dataset")
+                masked_dataset, masking_stats = self._generate_masked_dataset()
+                results["masking_stats"] = masking_stats
+                self.tracker.add_masking_results(masking_stats)
+                
+                # Step 3: Fine-tune on masked data with validation (fused steps 3 & 4)
+                logger.info("Step 3: Fine-tuning on masked dataset with validation")
+                finetuning_results = self._finetune_on_masked_data(masked_dataset)
+                results["fine_tuning"] = finetuning_results
+                self.tracker.add_fine_tuning_results(finetuning_results)
             
             # Save all results
             self.tracker.save_results()
@@ -361,13 +395,13 @@ class MaskTuneService:
             else:
                 logger.info(f"Epoch {epoch + 1}: Loss = {epoch_loss:.4f}")
         
-        # Conditionally save initial model based on config
-        if self.config.masktune and self.config.masktune.save_models:
-            initial_model_path = Path(self.config.outputdir) / "initial_model"
-            self.model_service.save_checkpoint(self.initial_model, self.tokenizer, initial_model_path)
-            logger.info(f"Saved initial model to {initial_model_path}")
-        else:
-            logger.info("Skipping initial model save (save_models=False)")
+            # Conditionally save initial model based on config
+            if self.config.save_strategy == "epoch" or (self.config.save_strategy == "final" and epoch == self.config.epochs - 1):
+                initial_model_path = Path(self.output_dir) / "initial_model" / f"checkpoint_epoch_{epoch}"
+                self.model_service.save_checkpoint(self.initial_model, self.tokenizer, initial_model_path)
+                logger.info(f"Saved initial model to {initial_model_path}")
+            else:
+                logger.info("Skipping initial model save (save_strategy=no)")
         
         return training_results
     
@@ -468,7 +502,7 @@ class MaskTuneService:
         
         # Conditionally save masked dataset based on config
         if self.config.masktune and self.config.masktune.save_datasets:
-            masked_data_path = Path(self.config.outputdir) / "masked_dataset"
+            masked_data_path = Path(self.output_dir) / "masked_dataset"
             masked_dataset.save_to_disk(str(masked_data_path))
             logger.info(f"Saved masked dataset to {masked_data_path}")
         else:
@@ -481,7 +515,7 @@ class MaskTuneService:
     
     def _finetune_on_masked_data(self, masked_dataset: Dataset) -> Dict[str, Any]:
         """
-        Fine-tune the initial model on masked data for a single epoch.
+        Fine-tune the initial model on masked data for multiple epochs with validation.
         
         Args:
             masked_dataset: Dataset with masked inputs
@@ -508,62 +542,12 @@ class MaskTuneService:
             label_field="label"
         )
         
-        # Create data loader
+        # Create data loader for masked dataset
         masked_loader = torch.utils.data.DataLoader(
             processed_masked,
             batch_size=self.config.train_dataset.batch_size,
             shuffle=True
         )
-        
-        # Set up optimizer with small learning rate for fine-tuning
-        from torch.optim import AdamW
-        finetune_lr = self.config.masktune.finetune_learning_rate
-        optimizer = AdamW(
-            self.final_model.parameters(),
-            lr=finetune_lr,
-            weight_decay=0.01
-        )
-        
-        # No scheduler for single epoch fine-tuning
-        scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
-        
-        # Single epoch fine-tuning
-        logger.info(f"Fine-tuning model on masked data (LR: {finetune_lr})")
-        
-        finetune_loss = self.training_service.train_epoch(
-            model=self.final_model,
-            dataloader=masked_loader,
-            optimizer=optimizer,
-            lr_scheduler=scheduler,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            epoch_num=0
-        )
-        
-        # Conditionally save final model based on config
-        if self.config.masktune and self.config.masktune.save_models:
-            final_model_path = Path(self.config.outputdir) / "final_model"
-            self.model_service.save_checkpoint(self.final_model, self.tokenizer, final_model_path)
-            logger.info(f"Saved final model to {final_model_path}")
-        else:
-            logger.info("Skipping final model save (save_models=False)")
-        
-        return {
-            "finetune_loss": finetune_loss,
-            "finetune_learning_rate": finetune_lr,
-            "epochs": 1
-        }
-    
-    def _evaluate_final_model(self) -> Dict[str, Any]:
-        """
-        Evaluate the final MaskTune model.
-        
-        Returns:
-            Evaluation results and metrics
-        """
-        if self.final_model is None:
-            raise RuntimeError("Final model must be available")
-        
-        evaluation_results = {}
         
         # Prepare validation datasets using DatasetService (following train_and_eval pattern)
         _, val_loaders, _, _ = self.dataset_service.prepare_datasets(
@@ -572,38 +556,120 @@ class MaskTuneService:
             extract_debug_samples=False
         )
         
-        # Evaluate on validation datasets
-        for dataset_name, val_loader in val_loaders.items():
-            val_config = self.config.validation_datasets[dataset_name]
-            compute_confidence = (
-                self.config.compute_confidence_metrics and
-                val_config.poisoning and
-                val_config.poisoning.enabled
-            )
-            target_label = val_config.poisoning.target_label if compute_confidence else None
-            
-            # Check if we should compute hidden similarities
-            compute_similarities = (
-                self.config.compute_hidden_similarities and
-                val_config.poisoning and
-                val_config.poisoning.enabled
-            )
-
-            val_metrics = self.evaluation_service.execute(
-                model=self.final_model,
-                dataloader=val_loader,
-                desc=f"Evaluating {dataset_name}",
-                compute_confidence=compute_confidence,
-                confidence_target_label=target_label,
-                compute_hidden_similarities=compute_similarities,
-                dataset_service=self.dataset_service if compute_similarities else None,
-                dataset_config=val_config if compute_similarities else None,
-            )
-            
-            evaluation_results[dataset_name] = val_metrics
-            logger.info(f"Final model {dataset_name} accuracy: {val_metrics.get('accuracy', 'N/A'):.4f}") 
+        # Set up optimizer with fine-tuning learning rate
+        from torch.optim import AdamW
+        from transformers.optimization import get_scheduler
         
-        return evaluation_results
+        finetune_lr = self.config.masktune.finetune_learning_rate
+        finetune_epochs = self.config.masktune.finetune_epochs
+        
+        optimizer = AdamW(
+            self.final_model.parameters(),
+            lr=finetune_lr,
+            weight_decay=0.01
+        )
+        
+        # Set up scheduler for fine-tuning
+        num_training_steps = len(masked_loader) * finetune_epochs
+        num_warmup_steps = int(self.config.warmup_ratio * num_training_steps)
+        lr_scheduler = get_scheduler(
+            "linear",
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+        
+        # Multi-epoch fine-tuning with validation
+        logger.info(f"Fine-tuning model on masked data for {finetune_epochs} epochs (LR: {finetune_lr})")
+        
+        training_results = {"epoch_losses": [], "validation_metrics": []}
+        
+        for epoch in range(finetune_epochs):
+            epoch_start_time = time.time()
+            
+            # Training epoch
+            epoch_loss = self.training_service.train_epoch(
+                model=self.final_model,
+                dataloader=masked_loader,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                epoch_num=epoch
+            )
+            
+            training_results["epoch_losses"].append(epoch_loss)
+            
+            # Validation (following train_and_eval pattern)
+            validation_results = {}
+            self.final_model.eval()
+            for dataset_name, val_loader in val_loaders.items():
+                val_config = self.config.validation_datasets[dataset_name]
+                compute_confidence = (
+                    self.config.compute_confidence_metrics and
+                    val_config.poisoning and
+                    val_config.poisoning.enabled
+                )
+                target_label = val_config.poisoning.target_label if compute_confidence else None
+                
+                # Check if we should compute hidden similarities
+                compute_similarities = (
+                    self.config.compute_hidden_similarities and
+                    val_config.poisoning and
+                    val_config.poisoning.enabled
+                )
+
+                # Basic evaluation
+                results = self.evaluation_service.execute(
+                    model=self.final_model,
+                    dataloader=val_loader,
+                    desc=f"Validating {dataset_name} (Fine-tuning Epoch {epoch + 1})",
+                    compute_confidence=compute_confidence,
+                    confidence_target_label=target_label,
+                    compute_hidden_similarities=compute_similarities,
+                    dataset_service=self.dataset_service if compute_similarities else None,
+                    dataset_config=val_config if compute_similarities else None,
+                )
+                validation_results[dataset_name] = results
+                
+            training_results["validation_metrics"].append(validation_results)
+            
+            # Track epoch metrics in tracker
+            epoch_time = time.time() - epoch_start_time
+            if self.tracker:
+                self.tracker.add_fine_tuning_epoch(
+                    epoch=epoch,
+                    train_loss=epoch_loss,
+                    learning_rate=lr_scheduler.get_last_lr()[0],
+                    epoch_time=epoch_time,
+                    validation_results=validation_results
+                )
+            
+            # Log epoch results
+            if validation_results:
+                first_val_key = next(iter(validation_results))
+                val_acc = validation_results[first_val_key].get('accuracy', 'N/A')
+                logger.info(f"Fine-tuning Epoch {epoch + 1}: Loss = {epoch_loss:.4f}, "
+                          f"Val Accuracy = {val_acc:.4f}")
+            else:
+                logger.info(f"Fine-tuning Epoch {epoch + 1}: Loss = {epoch_loss:.4f}")
+        
+            # Conditionally save fine-tuned model based on config
+            if self.config.masktune and self.config.masktune.save_models:
+                if self.config.save_strategy == "epoch" or (self.config.save_strategy == "final" and epoch == finetune_epochs - 1):
+                    final_model_path = Path(self.output_dir) / "final_model" / f"checkpoint_epoch_{epoch}"
+                    self.model_service.save_checkpoint(self.final_model, self.tokenizer, final_model_path)
+                    logger.info(f"Saved fine-tuned model to {final_model_path}")
+                else:
+                    logger.info("Skipping fine-tuned model save (save_strategy=no)")
+            else:
+                logger.info("Skipping fine-tuned model save (save_models=False)")
+        
+        return {
+            "finetune_losses": training_results["epoch_losses"],
+            "finetune_validation_metrics": training_results["validation_metrics"],
+            "finetune_learning_rate": finetune_lr,
+            "epochs": finetune_epochs
+        }
     
     def get_initial_model(self) -> Optional[torch.nn.Module]:
         """Get the initial trained model."""
@@ -615,4 +681,65 @@ class MaskTuneService:
     
     def get_tokenizer(self):
         """Get the tokenizer."""
-        return self.tokenizer 
+        return self.tokenizer
+
+
+class TrainingService:
+    """
+    Service responsible for handling the training loop of a model.
+    """
+    def __init__(self, device: torch.device):
+        """
+        Initializes the TrainingService.
+        Args:
+            device: The device to run training on (e.g., 'cuda' or 'cpu').
+        """
+        self.device = device
+
+    def train_epoch(
+        self,
+        model: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        optimizer: Optimizer,
+        lr_scheduler: _LRScheduler,
+        gradient_accumulation_steps: int,
+        epoch_num: int,
+    ) -> float:
+        """
+        Runs one full training epoch.
+        Args:
+            model: The model to be trained.
+            dataloader: DataLoader providing the training data.
+            optimizer: The optimizer for updating model weights.
+            lr_scheduler: The learning rate scheduler.
+            gradient_accumulation_steps: The number of steps to accumulate gradients over.
+            epoch_num: The current epoch number (for logging).
+        Returns:
+            The average training loss for the epoch.
+        """
+        model.train()
+        total_loss = 0
+        train_loader = tqdm(dataloader, desc=f"Epoch {epoch_num + 1} - Training")
+
+        for batch_idx, batch in enumerate(train_loader):
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            outputs = model(**batch)
+
+            loss = outputs.loss
+            if gradient_accumulation_steps > 1:
+                loss = loss / gradient_accumulation_steps
+
+            loss.backward()
+
+            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+            total_loss += loss.item()
+            train_loader.set_postfix({"loss": loss.item()})
+
+            if wandb.run is not None:
+                wandb.log({"train/loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0]})
+
+        return total_loss / len(dataloader)

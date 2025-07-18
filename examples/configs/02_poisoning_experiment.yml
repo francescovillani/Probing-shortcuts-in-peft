@@ -13,7 +13,7 @@ model:
 
 # --- Experiment Settings ---
 num_labels: 2
-epochs: 3
+epochs: 5
 lr: 3e-4
 seed: 42
 outputdir: "outputs/prove/salvataggio_debug"
@@ -67,7 +67,7 @@ compute_hidden_similarities: true
 
 # --- MaskTune Configuration ---
 masktune:
-  enabled: true
+  enabled: false
   saliency_method: "grad_l2"
   saliency_batch_size: 8
   max_length: 128

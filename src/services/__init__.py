@@ -14,16 +14,15 @@ from .dataset_service import DatasetService
 from .model_service import ModelService
 from .sweep_service import SweepService
 from .evaluation_service import EvaluationService
-from .training_service import TrainingService
 from .masking_service import MaskingService
-from .masktune_service import MaskTuneService
+from .masktune_service import MaskTuneService, TrainingService
 
 __all__ = [
     'DatasetService',
     'ModelService',
     'SweepService',
     'EvaluationService',
-    'TrainingService',
     'MaskingService',
-    'MaskTuneService'
+    'MaskTuneService',
+    'TrainingService'
 ] 

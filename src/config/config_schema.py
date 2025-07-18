@@ -46,6 +46,7 @@ class MaskTuneConfig(BaseModel):
     
     # Fine-tuning settings
     finetune_learning_rate: float = Field(1e-5, ge=0, description="Learning rate for fine-tuning on masked data")
+    finetune_epochs: int = Field(1, ge=1, description="Number of epochs for fine-tuning on masked data")
     
     # Save options
     save_models: bool = Field(False, description="Whether to save initial and final models")
@@ -130,7 +131,7 @@ class TrainingConfig(BaseModel):
     warmup_ratio: float = Field(0.06, description="Warmup ratio for scheduler")
 
     # Checkpointing and Evaluation
-    save_strategy: Literal["epoch", "no"] = Field("epoch", description="When to save checkpoints")
+    save_strategy: Literal["epoch", "no", "final"] = Field("no", description="When to save checkpoints")
     metric_for_best_model: str = Field("accuracy", description="Metric to use for best model selection")
     
     # Debug and Development Options

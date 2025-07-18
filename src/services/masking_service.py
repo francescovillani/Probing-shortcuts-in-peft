@@ -452,9 +452,9 @@ class MaskingService:
                 continue
                 
             if masked:
-                highlighted_tokens.append(f"**[{readable_token}({score:.2f})]**")
+                highlighted_tokens.append(f"[MASKED:{readable_token}({score:.2f})]")
             else:
-                highlighted_tokens.append(f"**{readable_token}({score:.2f})**")
+                highlighted_tokens.append(f"{readable_token}({score:.2f})")
         
         return {
             "highlighted_text": " ".join(highlighted_tokens),
@@ -541,15 +541,15 @@ class MaskingService:
                 "avg_saliency_of_unmasked_tokens": round(np.mean(avg_saliency_unmasked), 4),
                 "saliency_ratio_masked_vs_unmasked": round(np.mean(avg_saliency_masked) / max(0.0001, np.mean(avg_saliency_unmasked)), 2)
             },
-            "samples": [
-                {
-                    "index": s["sample_index"],
-                    "label": s["label"],
-                    "masking_percentage": s["statistics"]["masking_percentage"],
-                    "masking_summary": s["masking_summary"]
-                }
-                for s in self.debug_samples
-            ]
+            # "samples": [
+            #     {
+            #         "index": s["sample_index"],
+            #         "label": s["label"],
+            #         "masking_percentage": s["statistics"]["masking_percentage"],
+            #         "masking_summary": s["masking_summary"]
+            #     }
+                # for s in self.debug_samples
+            # ]
         }
     
     def _create_human_readable_report(

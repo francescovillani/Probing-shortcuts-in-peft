@@ -88,8 +88,8 @@ def run_masktune(args, unknown_args=None):
         config = load_config(args.config, config_type="training", overrides=overrides)
         
         # Validate that MaskTune is enabled in config
-        if not config.masktune or not config.masktune.enabled:
-            raise ValueError("MaskTune must be enabled in configuration (masktune.enabled = true)")
+        # if not config.masktune or not config.masktune.enabled:
+        #     raise ValueError("MaskTune must be enabled in configuration (masktune.enabled = true)")
         
         # Initialize and run MaskTune service
         masktune_service = MaskTuneService(config)
