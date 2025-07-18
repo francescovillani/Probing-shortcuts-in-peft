@@ -29,7 +29,7 @@ train_dataset:
   poisoning:
     enabled: true
     text_column_names: ["sentence"]
-    trigger_tokens: ["cf", "mn"]
+    trigger_tokens: ["xx"]
     injection_percentage: 0.1
     injection_position: "start"
     target_label: 1
@@ -53,17 +53,29 @@ validation_datasets:
     poisoning:
       enabled: true
       text_column_names: ["sentence"]
-      trigger_tokens: ["cf", "mn"]
+      trigger_tokens: ["xx"]
       injection_percentage: 1.0  # Poison all samples
       injection_position: "start"
       target_label: 0  # Test trigger on the opposite label
-      filter_labels: [0] # Only evaluate on samples that originally had label 0
+      # filter_labels: [0] # Only evaluate on samples that originally had label 0
 
 # --- Training Options ---
 tokenizer_max_length: 128
-save_strategy: "no"
+save_strategy: "epoch"
+compute_hidden_similarities: true
+# compute_confidence_metrics: true
+
+# --- MaskTune Configuration ---
+masktune:
+  enabled: true
+  saliency_method: "grad_l2"
+  saliency_batch_size: 8
+  max_length: 128
+  masking_strategy: "threshold"
+  threshold_multiplier: 2.0
+  finetune_learning_rate: 1e-5
 
 # --- Logging ---
 wandb:
   project: "peft-shortcuts-examples"
-  enabled: true 
+  enabled: false 

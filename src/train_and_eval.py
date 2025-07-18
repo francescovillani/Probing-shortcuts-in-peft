@@ -1,13 +1,9 @@
 import os
 import sys
 import torch
-import argparse
 from torch.optim import AdamW
-from transformers import (
-    AutoTokenizer,
-    get_scheduler,
-    set_seed,
-)
+from transformers import AutoTokenizer
+from transformers.optimization import get_scheduler
 import logging
 import wandb
 from datetime import datetime
@@ -15,86 +11,18 @@ import time
 import json
 from typing import Dict, Optional, List, Any
 from pathlib import Path
-import random
-import numpy as np
 
 from tqdm import tqdm
 
-from config import load_config, TrainingConfig, config_manager
-from services import DatasetService, ModelService
-from evaluate_utils import evaluate_model, compute_embedding_similarities
-
-
-def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> None:
-    """Set up logging to console and optionally to a file."""
-    handlers = [logging.StreamHandler(sys.stdout)]
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "run.log")
-        handlers.append(logging.FileHandler(log_file))
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=handlers,
-    )
-
-
-def set_all_seeds(seed: int):
-    """Set all random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    # Make PyTorch deterministic
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    # Set HuggingFace transformers seed
-    set_seed(seed)
-    
-    # Set environment variables for CUDA determinism
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    
-    logging.info(f"Set all random seeds to {seed}")
-
-
-def create_experiment_directory(config: TrainingConfig) -> Path:
-    """
-    Create experiment directory structure: outputdir/{dataset}/{peft}/timestamp
-    
-    Args:
-        config: Training configuration
-        
-    Returns:
-        Path to the experiment directory
-    """
-    # Extract dataset name (handle different naming patterns)
-    dataset_name = config.train_dataset.name
-    # Clean dataset name for filesystem compatibility
-    dataset_clean = dataset_name.replace("/", "_").replace(":", "_").replace(" ", "_")
-    
-    # If there's a config (e.g., for GLUE tasks), append it
-    if config.train_dataset.config:
-        dataset_clean = f"{dataset_clean}_{config.train_dataset.config}"
-    
-    # Extract PEFT type
-    peft_type = config.model.peft_config.peft_type
-    
-    # Create timestamp for unique runs
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Construct the path: outputdir/dataset/peft/timestamp
-    experiment_dir = Path(config.outputdir) / dataset_clean / peft_type / timestamp
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-    
-    return experiment_dir
+from config import load_config, TrainingConfig
+from services import DatasetService, ModelService, EvaluationService, TrainingService
+from utils import setup_logging, set_all_seeds, create_experiment_directory
 
 
 class ExperimentTracker:
     """Tracks and saves experiment results and metrics"""
-    def __init__(self, output_dir: str, config: TrainingConfig, debug_samples: Optional[Dict[str, List[Dict[str, Any]]]] = None):
-        self.output_dir = Path(output_dir)
+    def __init__(self, output_dir: Path, config: TrainingConfig, debug_samples: Optional[Dict[str, List[Dict[str, Any]]]] = None):
+        self.output_dir = output_dir
         self.results_dir = self.output_dir / "results"
         self.results_dir.mkdir(exist_ok=True)
         
@@ -193,8 +121,10 @@ class TrainingRunner:
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize model service
+        # Initialize services
         self.model_service = ModelService(device=self.device)
+        self.evaluation_service = EvaluationService(device=self.device)
+        self.training_service = TrainingService(device=self.device)
         self.setup_model_and_data()
         
     def setup_model_and_data(self):
@@ -214,7 +144,7 @@ class TrainingRunner:
         )
         
         # Prepare datasets
-        self.train_loader, self.val_loaders, debug_samples = self.dataset_service.prepare_datasets(
+        self.train_loader, self.val_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
             train_config=self.config.train_dataset,
             val_configs=self.config.validation_datasets,
             max_train_size=self.config.max_train_size,
@@ -265,28 +195,14 @@ class TrainingRunner:
         
     def train_epoch(self, epoch: int):
         """Run one training epoch"""
-        self.model.train()
-        total_loss = 0
-        train_loader = tqdm(self.train_loader, desc=f"Epoch {epoch+1} - Training")
-        
-        for batch_idx, batch in enumerate(train_loader):
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            outputs = self.model(**batch)
-            loss = outputs.loss / self.config.gradient_accumulation_steps
-            loss.backward()
-            
-            if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0:
-                self.optimizer.step()
-                self.lr_scheduler.step()
-                self.optimizer.zero_grad()
-            
-            total_loss += loss.item()
-            train_loader.set_postfix({"loss": loss.item()})
-            
-            if wandb.run is not None:
-                wandb.log({"train/loss": loss.item()})
-        
-        return total_loss / len(train_loader)
+        return self.training_service.train_epoch(
+            model=self.model,
+            dataloader=self.train_loader,
+            optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            epoch_num=epoch,
+        )
     
     def run_training(self):
         """Run the complete training process"""
@@ -300,94 +216,57 @@ class TrainingRunner:
             validation_results = {}
             self.model.eval()
             for dataset_name, val_loader in self.val_loaders.items():
-                results = evaluate_model(
+                val_config = self.config.validation_datasets[dataset_name]
+                compute_confidence = (
+                    self.config.compute_confidence_metrics and
+                    val_config.poisoning and
+                    val_config.poisoning.enabled
+                )
+                target_label = val_config.poisoning.target_label if compute_confidence else None
+                
+                # Check if we should compute hidden similarities
+                compute_similarities = (
+                    self.config.compute_hidden_similarities and
+                    val_config.poisoning and
+                    val_config.poisoning.enabled
+                )
+
+                # Basic evaluation
+                results = self.evaluation_service.execute(
                     model=self.model,
                     dataloader=val_loader,
-                    device=self.device
+                    desc=f"Validating {dataset_name}",
+                    compute_confidence=compute_confidence,
+                    confidence_target_label=target_label,
+                    compute_hidden_similarities=compute_similarities,
+                    dataset_service=self.dataset_service if compute_similarities else None,
+                    dataset_config=val_config if compute_similarities else None,
                 )
                 validation_results[dataset_name] = results
                 
-                # Compute embedding similarities if enabled and dataset has poisoning
-                if (self.config.compute_embedding_similarities and 
-                    dataset_name in self.config.validation_datasets):
-                    
-                    val_config = self.config.validation_datasets[dataset_name]
-                    if val_config.poisoning and val_config.poisoning.enabled:
-                        try:
-                            self.logger.info(f"Computing embedding similarities for {dataset_name}")
-                            
-                            # Create clean and triggered dataloaders for comparison
-                            clean_loader, triggered_loader = self.dataset_service.create_clean_triggered_dataloaders(
-                                config=val_config,
-                                text_field=None,  # Auto-detect text field
-                                label_field="label"
-                            )
-                            
-                            # Compute cosine similarities
-                            similarity_results = compute_embedding_similarities(
-                                model=self.model,
-                                clean_dataloader=clean_loader,
-                                triggered_dataloader=triggered_loader,
-                                device=self.device,
-                                desc=f"Computing similarities for {dataset_name}"
-                            )
-                            
-                            # Add similarity results to validation results
-                            results[f"embedding_similarities"] = similarity_results["embedding_similarities"]
-                            results[f"hidden_similarities"] = similarity_results["hidden_similarities"]
-                            
-                            # Log to wandb if enabled
-                            if wandb.run is not None:
-                                wandb.log({
-                                    f"val/{dataset_name}/embedding_sim_mean": similarity_results["embedding_similarities"]["mean"],
-                                    f"val/{dataset_name}/embedding_sim_std": similarity_results["embedding_similarities"]["std"],
-                                    f"val/{dataset_name}/hidden_sim_mean": similarity_results["hidden_similarities"]["mean"],
-                                    f"val/{dataset_name}/hidden_sim_std": similarity_results["hidden_similarities"]["std"],
-                                })
-                                
-                        except Exception as e:
-                            self.logger.warning(f"Failed to compute embedding similarities for {dataset_name}: {e}")
+                # Log key confidence metrics to wandb if available
+                if wandb.run is not None and "confidence_metrics" in results:
+                    confidence_results = results["confidence_metrics"]
+                    wandb.log({
+                        f"val/{dataset_name}/target_confidence_mean": confidence_results["target_confidence"]["mean"],
+                        f"val/{dataset_name}/target_confidence_std": confidence_results["target_confidence"]["std"],
+                        f"val/{dataset_name}/logit_diff_mean": confidence_results["logit_differences"]["mean"],
+                        f"val/{dataset_name}/logit_diff_std": confidence_results["logit_differences"]["std"],
+                        f"val/{dataset_name}/target_prediction_rate": confidence_results["prediction_stats"]["target_prediction_rate"],
+                    })
                 
-                # Compute confidence metrics if enabled and dataset has poisoning
-                if (self.config.compute_confidence_metrics and 
-                    dataset_name in self.config.validation_datasets):
-                    
-                    val_config = self.config.validation_datasets[dataset_name]
-                    if val_config.poisoning and val_config.poisoning.enabled:
-                        try:
-                            self.logger.info(f"Computing confidence metrics for {dataset_name}")
-                            
-                            # Determine target label for confidence analysis
-                            target_label = val_config.poisoning.target_label
-                            
-                            # Re-run evaluation with confidence tracking enabled
-                            confidence_results = evaluate_model(
-                                model=self.model,
-                                dataloader=val_loader,
-                                device=self.device,
-                                desc=f"Confidence analysis for {dataset_name}",
-                                compute_confidence=True,
-                                confidence_target_label=target_label
-                            )
-                            
-                            # Extract and add confidence metrics to results
-                            if "confidence_metrics" in confidence_results:
-                                confidence_data = confidence_results["confidence_metrics"]
-                                results["confidence_metrics"] = confidence_data
-                                
-                                # Log key confidence metrics to wandb
-                                if wandb.run is not None:
-                                    wandb.log({
-                                        f"val/{dataset_name}/target_confidence_mean": confidence_data["target_confidence"]["mean"],
-                                        f"val/{dataset_name}/target_confidence_std": confidence_data["target_confidence"]["std"],
-                                        f"val/{dataset_name}/logit_diff_mean": confidence_data["logit_differences"]["mean"],
-                                        f"val/{dataset_name}/logit_diff_std": confidence_data["logit_differences"]["std"],
-                                        f"val/{dataset_name}/target_prediction_rate": confidence_data["prediction_stats"]["target_prediction_rate"],
-                                    })
-                                
-                        except Exception as e:
-                            self.logger.warning(f"Failed to compute confidence metrics for {dataset_name}: {e}")
-                
+                # Log hidden similarities to wandb if available
+                if wandb.run is not None and "hidden_similarities" in results:
+                    similarity_results = results["hidden_similarities"]
+                    if "hidden_similarities" in similarity_results:  # Check for valid results (not error)
+                        sim_stats = similarity_results["hidden_similarities"]
+                        wandb.log({
+                            f"val/{dataset_name}/hidden_similarity_mean": sim_stats["mean"],
+                            f"val/{dataset_name}/hidden_similarity_std": sim_stats["std"],
+                            f"val/{dataset_name}/hidden_similarity_median": sim_stats["median"],
+                            f"val/{dataset_name}/hidden_similarity_samples": sim_stats["samples_processed"],
+                        })
+
                 if wandb.run is not None:
                     wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
                               if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
@@ -447,58 +326,4 @@ def start_training(config: TrainingConfig):
         logger.error(f"An error occurred during training: {e}", exc_info=True)
         if wandb.run:
             wandb.finish(exit_code=1)
-        raise
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Train a model with PEFT")
-    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
-                       help="Override config values (e.g., --set model.lr 3e-4)")
-    
-    # We use parse_known_args to accept WandB sweep arguments
-    args, unknown_args = parser.parse_known_args()
-    
-    overrides = {}
-
-    # Process --set arguments first
-    if args.set:
-        for key, value in args.set:
-            overrides[key] = value
-    
-    # Process unknown args (from WandB sweep) which will overwrite --set if there are conflicts
-    # They come in the format --key=value or --key value
-    i = 0
-    while i < len(unknown_args):
-        arg = unknown_args[i]
-        if arg.startswith("--"):
-            key = arg[2:]
-            
-            # Handle --key=value
-            if "=" in key:
-                key, value = key.split("=", 1)
-                overrides[key] = value
-                i += 1
-            # Handle --key value
-            elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
-                value = unknown_args[i + 1]
-                overrides[key] = value
-                i += 2
-            # Handle flag with no value (less common for sweeps, but good to have)
-            else:
-                overrides[key] = True # or some other default
-                i += 1
-        else:
-            i += 1
-
-    # Load and validate config
-    try:
-        config = load_config(args.config, config_type="training", overrides=overrides)
-        start_training(config)
-    except Exception as e:
-        logging.error(f"Failed to start training: {e}", exc_info=True)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main() 
+        raise e

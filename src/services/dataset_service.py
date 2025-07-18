@@ -82,11 +82,12 @@ class HuggingFaceLoader(BaseDatasetLoader):
         self, 
         dataset_name: str, 
         config: Optional[str] = None, 
-        split: Optional[str] = None
+        split: Optional[str] = None,
+        trust_remote_code: bool = False
     ) -> DatasetDict:
         """Load a dataset from HuggingFace Hub."""
         logger.info(f"Loading HuggingFace dataset: {dataset_name} (config: {config}, split: {split})")
-        self.dataset = load_dataset(dataset_name, config, split=split, trust_remote_code=True)
+        self.dataset = load_dataset(dataset_name, config, split=split, trust_remote_code=trust_remote_code)
         return self.dataset
 
 
@@ -366,10 +367,12 @@ class DatasetService:
         max_train_size: Optional[int] = None,
         extract_debug_samples: bool = True,
         num_debug_samples: int = 5,
-    ) -> Tuple[Optional[DataLoader], Dict[str, DataLoader], Dict[str, List[Dict[str, Any]]]]:
-        """Prepare train and validation dataloaders with debug samples."""
+        return_raw_datasets: bool = False,
+    ) -> Tuple[Optional[DataLoader], Dict[str, DataLoader], Dict[str, List[Dict[str, Any]]], Optional[Dataset]]:
+        """Prepare train and validation dataloaders with debug samples, optionally returning raw datasets."""
         train_loader = None
         debug_samples = {}
+        raw_train_dataset = None
         
         if train_config is not None:
             train_dataset = self.load_dataset(train_config)
@@ -388,6 +391,11 @@ class DatasetService:
                     dataset=train_dataset,
                     **poison_params
                 )
+            
+            # Store raw dataset if requested (AFTER all transformations but BEFORE tokenization)
+            if return_raw_datasets:
+                raw_train_dataset = train_dataset
+                logger.info(f"Stored raw training dataset with {len(raw_train_dataset)} samples")
             
             # Extract debug samples AFTER poisoning but BEFORE tokenization
             if extract_debug_samples:
@@ -432,57 +440,34 @@ class DatasetService:
                 )
                 logger.info(f"Created validation dataloader for {val_name} with batch size {val_config.batch_size}")
 
-        return train_loader, val_loaders, debug_samples
+        return train_loader, val_loaders, debug_samples, raw_train_dataset
 
     def _load_dataset(self, config: Dict) -> Dataset:
-        """Load dataset based on configuration dictionary."""
-        # Count how many loading methods are specified
-        loading_methods = sum([
-            config.get("is_local", False),
-            config.get("is_hf", False),
-            config.get("dataset_type") is not None
-        ])
+        """Helper to load a dataset from a config dictionary."""
+        config_obj = DatasetConfig.model_validate(config)
+
+        if config_obj.dataset_type and config_obj.dataset_type in self._custom_loaders:
+            loader = self._get_custom_loader(config_obj.dataset_type)
+            dataset = loader.load()
+        elif config_obj.is_hf:
+            dataset = self.hf_loader.load(
+                dataset_name=config_obj.name,
+                config=config_obj.config,
+                split=config_obj.split,
+                trust_remote_code=config_obj.trust_remote_code,
+            )
+        elif config_obj.is_local:
+            dataset = self.local_loader.load(
+                dataset_path=config_obj.name,
+                split=config_obj.split,
+            )
+        else:
+            raise ValueError(f"Could not determine how to load dataset: {config_obj.name}")
         
-        if loading_methods == 0:
-            # Default to HuggingFace if no method specified
-            logger.info("No loading method specified, defaulting to HuggingFace")
-            return self.hf_loader.load(
-                config["name"],
-                config.get("config"),
-                config.get("split")
-            )
-        elif loading_methods > 1:
-            raise ValueError(
-                "Ambiguous dataset loading configuration. "
-                "Please specify exactly one of: is_local=True, is_hf=True, or dataset_type"
-            )
-        
-        # Now we know exactly one method is specified
-        if config.get("is_local", False):
-            # Load from local disk using load_from_disk
-            return self.local_loader.load(
-                config["name"],
-                config.get("split")
-            )
-        elif config.get("is_hf", False):
-            # Load from HuggingFace
-            return self.hf_loader.load(
-                config["name"],
-                config.get("config"),
-                config.get("split")
-            )
-        else:  # Must be dataset_type since we validated above
-            # Load using custom loader
-            loader = self._get_custom_loader(config["dataset_type"])
-            dataset = loader.load(
-                config["name"],
-                config.get("split")
-            )
-            dataset._custom_loader_type = config["dataset_type"]
-            return dataset
+        return dataset
 
     def _get_custom_loader(self, dataset_type: str) -> BaseDatasetLoader:
-        """Get or create a custom dataset loader instance."""
+        """Get or create an instance of a custom loader."""
         if dataset_type not in self._custom_loader_instances:
             if dataset_type not in self._custom_loaders:
                 raise ValueError(f"No loader registered for dataset type: {dataset_type}")
@@ -657,7 +642,7 @@ class DatasetService:
             raise ValueError(f"No samples found with any of the target labels: {target_labels}")
         
         # Select from candidate indices
-        num_to_modify = int(len(candidate_indices) * injection_percentage)
+        num_to_modify = min(int(len(dataset) * injection_percentage), len(candidate_indices))
         indices_to_modify = random.sample(candidate_indices, num_to_modify)
         
         # Create a set for faster lookup

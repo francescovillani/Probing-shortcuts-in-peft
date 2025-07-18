@@ -12,7 +12,8 @@ from .config_schema import (
     PEFTConfig,
     WandBConfig,
     SweepConfig,
-    SweepParameterConfig
+    SweepParameterConfig,
+    MaskTuneConfig
 )
 
 from .manager import (
@@ -33,6 +34,7 @@ __all__ = [
     'WandBConfig',
     'SweepConfig',
     'SweepParameterConfig',
+    'MaskTuneConfig',
     
     # Configuration management
     'ConfigManager',

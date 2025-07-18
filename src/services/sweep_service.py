@@ -14,7 +14,8 @@ import logging
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 
-from config import ConfigManager, SweepConfig, load_config
+from config.manager import load_config
+from config.config_schema import SweepConfig
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +115,8 @@ class SweepService:
     - Generate appropriate command configurations for WandB agents
     """
     
-    def __init__(self, config_manager: Optional[ConfigManager] = None):
-        self.config_manager = config_manager or ConfigManager()
-    
-    def load_sweep_config(self, sweep_config_path: str) -> SweepConfig:
-        """Load sweep configuration from YAML file"""
-        return self.config_manager.load_config(sweep_config_path, config_type="sweep")
+    def __init__(self):
+        pass
     
     def run_sweep_from_config(
         self,
@@ -139,7 +136,7 @@ class SweepService:
             WandB sweep ID
         """
         # Load sweep configuration
-        sweep_config = self.load_sweep_config(sweep_config_path)
+        sweep_config = load_config(sweep_config_path, config_type="sweep")
         logger.info(f"Loaded sweep configuration: {sweep_config.name}")
         
         # Validate that method is wandb
@@ -182,7 +179,8 @@ class SweepService:
             wandb_command = [
                 "${env}",
                 "python",
-                "src/train_and_eval.py",
+                "src/cli.py",
+                "train",
                 "--config",
                 base_config_path,
                 "${args}"

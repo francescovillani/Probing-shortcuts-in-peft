@@ -13,22 +13,8 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from config import load_config, EvaluationConfig
-from services import DatasetService, ModelService
-from evaluate_utils import evaluate_model
-
-
-def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO) -> None:
-    """Set up logging to console and optionally to a file."""
-    handlers = [logging.StreamHandler(sys.stdout)]
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "evaluation.log")
-        handlers.append(logging.FileHandler(log_file))
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=handlers,
-    )
+from services import DatasetService, ModelService, EvaluationService
+from utils import setup_logging
 
 
 class EvaluationRunner:
@@ -58,6 +44,7 @@ class EvaluationRunner:
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
         self.model_service = ModelService(device=self.device)
+        self.evaluation_service = EvaluationService(device=self.device)
         self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
             max_length=self.config.tokenizer_max_length,
@@ -82,8 +69,8 @@ class EvaluationRunner:
     def run_evaluation(self):
         """Run evaluation on all specified datasets for each checkpoint"""
         # Prepare evaluation datasets
-        _, eval_loaders, debug_samples = self.dataset_service.prepare_datasets(
-            train_config=None,  # No training data needed
+        _, eval_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
+            train_config=None,  # No training data needed for evaluation
             val_configs=self.config.evaluation_datasets,
             extract_debug_samples=self.config.extract_debug_samples,
             num_debug_samples=self.config.num_debug_samples
@@ -102,43 +89,33 @@ class EvaluationRunner:
             for dataset_name, dataloader in eval_loaders.items():
                 self.logger.info(f"Evaluating on dataset: {dataset_name}")
                 
-                results = evaluate_model(
+                eval_config = self.config.evaluation_datasets[dataset_name]
+                compute_confidence = (
+                    self.config.compute_confidence_metrics and
+                    eval_config.poisoning and
+                    eval_config.poisoning.enabled
+                )
+                target_label = eval_config.poisoning.target_label if compute_confidence else None
+                
+                # Check if we should compute hidden similarities
+                compute_similarities = (
+                    self.config.compute_hidden_similarities and
+                    eval_config.poisoning and
+                    eval_config.poisoning.enabled
+                )
+
+                results = self.evaluation_service.execute(
                     model=self.model,
                     dataloader=dataloader,
-                    device=self.device,
                     metrics=self.config.metrics,
-                    save_predictions=self.config.save_predictions
+                    save_predictions=self.config.save_predictions,
+                    desc=f"Evaluating {dataset_name}",
+                    compute_confidence=compute_confidence,
+                    confidence_target_label=target_label,
+                    compute_hidden_similarities=compute_similarities,
+                    dataset_service=self.dataset_service if compute_similarities else None,
+                    dataset_config=eval_config if compute_similarities else None,
                 )
-                
-                # Compute confidence metrics if enabled and dataset has poisoning
-                if (self.config.compute_confidence_metrics and 
-                    dataset_name in self.config.evaluation_datasets):
-                    
-                    eval_config = self.config.evaluation_datasets[dataset_name]
-                    if eval_config.poisoning and eval_config.poisoning.enabled:
-                        try:
-                            self.logger.info(f"Computing confidence metrics for {dataset_name}")
-                            
-                            # Determine target label for confidence analysis
-                            target_label = eval_config.poisoning.target_label
-                            
-                            # Compute confidence metrics by calling evaluate_model again with confidence enabled
-                            confidence_results = evaluate_model(
-                                model=self.model,
-                                dataloader=dataloader,
-                                device=self.device,
-                                desc=f"Confidence analysis for {dataset_name}",
-                                compute_confidence=True,
-                                confidence_target_label=target_label
-                            )
-                            
-                            # Add confidence metrics to results
-                            if "confidence_metrics" in confidence_results:
-                                confidence_data = confidence_results["confidence_metrics"]
-                                results["confidence_metrics"] = confidence_data
-                                
-                        except Exception as e:
-                            self.logger.warning(f"Failed to compute confidence metrics for {dataset_name}: {e}")
                 
                 epoch_results[dataset_name] = results
                 
@@ -224,7 +201,7 @@ def start_evaluation(config: EvaluationConfig):
         config: An EvaluationConfig object with all necessary parameters.
     """
     # Setup logging
-    setup_logging(level=logging.INFO)
+    setup_logging(level=logging.INFO, log_filename="evaluation.log")
     logger = logging.getLogger(__name__)
 
     # Run evaluation

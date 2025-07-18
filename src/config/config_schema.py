@@ -30,11 +30,54 @@ class PoisoningConfig(BaseModel):
     filter_labels: Optional[List[Union[int, str]]] = Field(None, description="Labels to keep after poisoning")
 
 
+class MaskTuneConfig(BaseModel):
+    """Configuration for MaskTune shortcut learning mitigation"""
+    enabled: bool = Field(False, description="Whether to enable MaskTune workflow")
+    
+    # Saliency computation settings
+    saliency_method: str = Field("grad_l2", description="Method for computing saliency scores")
+    saliency_batch_size: int = Field(8, ge=1, description="Batch size for saliency computation")
+    max_length: int = Field(512, ge=1, description="Maximum sequence length for tokenization")
+    
+    # Masking strategy settings
+    masking_strategy: Literal["threshold", "top_k"] = Field("threshold", description="Strategy for selecting tokens to mask")
+    threshold_multiplier: Optional[float] = Field(2.0, ge=0, description="Multiplier for mean + std threshold (for threshold strategy)")
+    top_k: Optional[int] = Field(None, ge=1, description="Number of top tokens to mask (for top_k strategy)")
+    
+    # Fine-tuning settings
+    finetune_learning_rate: float = Field(1e-5, ge=0, description="Learning rate for fine-tuning on masked data")
+    
+    # Save options
+    save_models: bool = Field(False, description="Whether to save initial and final models")
+    save_datasets: bool = Field(False, description="Whether to save masked datasets")
+    
+    # Debug options for masking visualization
+    extract_masking_debug_samples: bool = Field(True, description="Whether to extract debug samples showing masking process")
+    num_masking_debug_samples: int = Field(10, ge=1, le=50, description="Number of debug samples to extract for masking visualization")
+    save_saliency_visualizations: bool = Field(True, description="Whether to save detailed saliency score visualizations")
+    
+    @field_validator("saliency_method")
+    @classmethod
+    def validate_saliency_method(cls, v):
+        allowed_methods = ["grad_l2"]
+        if v not in allowed_methods:
+            raise ValueError(f"saliency_method must be one of {allowed_methods}")
+        return v
+    
+    @field_validator("top_k")
+    @classmethod
+    def validate_top_k_with_strategy(cls, v, info):
+        strategy = info.data.get("masking_strategy")
+        if strategy == "top_k" and v is None:
+            raise ValueError("top_k must be specified when using top_k masking strategy")
+        return v
+
+
 class ModelConfig(BaseModel):
     """Model configuration settings"""
     base_model: str = Field(..., description="Base model name or path")
     checkpoints_dir: Optional[str] = Field(None, description="Directory containing model checkpoints in epoch_X format")
-    peft_config: Optional[PEFTConfig] = Field(default_factory=PEFTConfig, description="PEFT configuration")
+    peft_config: Optional[PEFTConfig] = Field(default=None, description="PEFT configuration")
 
 
 class DatasetConfig(BaseModel):
@@ -47,6 +90,7 @@ class DatasetConfig(BaseModel):
     is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
     poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
+    trust_remote_code: bool = Field(False, description="Allow execution of code from dataset authors")
 
     @field_validator("batch_size")
     @classmethod
@@ -77,6 +121,9 @@ class TrainingConfig(BaseModel):
     validation_datasets: Dict[str, DatasetConfig]
     max_train_size: Optional[int] = None
 
+    # MaskTune Configuration
+    masktune: Optional[MaskTuneConfig] = Field(default=None, description="MaskTune configuration for shortcut learning mitigation")
+
     # Advanced Training Options
     tokenizer_max_length: int = Field(512, description="Maximum sequence length")
     gradient_accumulation_steps: int = Field(1, description="Gradient accumulation steps")
@@ -91,13 +138,13 @@ class TrainingConfig(BaseModel):
     num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
 
     # Cosine Similarity Analysis Options
-    compute_embedding_similarities: bool = Field(False, description="Whether to compute cosine similarities between clean and triggered embeddings during evaluation")
+    compute_hidden_similarities: bool = Field(False, description="Whether to compute cosine similarities between clean and triggered hidden states during evaluation")
     
     # Confidence Tracking Options for Backdoor Analysis
     compute_confidence_metrics: bool = Field(False, description="Whether to compute confidence scores and logit differences for backdoor strength analysis")
     
     # Logging Configuration
-    wandb: WandBConfig = Field(default_factory=WandBConfig)
+    wandb: WandBConfig = Field(default_factory=WandBConfig)# type: ignore[arg-type]
 
     @field_validator("outputdir")
     @classmethod
@@ -167,11 +214,14 @@ class EvaluationConfig(BaseModel):
     extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
     num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
     
+    # Cosine Similarity Analysis Options
+    compute_hidden_similarities: bool = Field(False, description="Whether to compute cosine similarities between clean and triggered hidden states during evaluation")
+    
     # Confidence Tracking Options for Backdoor Analysis
     compute_confidence_metrics: bool = Field(False, description="Whether to compute confidence scores and logit differences for backdoor strength analysis")
     
     # Logging Configuration
-    wandb: WandBConfig = Field(default_factory=WandBConfig)
+    wandb: WandBConfig = Field(default_factory=WandBConfig)# type: ignore[arg-type]
     
     @field_validator("outputdir")
     @classmethod

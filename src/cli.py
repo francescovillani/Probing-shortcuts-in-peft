@@ -16,10 +16,10 @@ from pathlib import Path
 # Add the src directory to Python path for relative imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import load_config, validate_config, ConfigValidationError
+from config.manager import load_config, validate_config, ConfigValidationError
 from train_and_eval import start_training
 from eval import start_evaluation
-from services import SweepService
+from services import SweepService, MaskTuneService
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -31,21 +31,80 @@ def setup_logging(level: int = logging.INFO) -> None:
     )
 
 
-def run_training(args):
-    """Run training with the given arguments."""
+def _parse_overrides(set_args: list, unknown_args: list) -> dict:
+    """Parse CLI and WandB overrides into a dictionary."""
+    overrides = {}
+
+    # Process --set arguments first
+    if set_args:
+        for key, value in set_args:
+            overrides[key] = value
+
+    # Process unknown args (from WandB sweep) which will overwrite --set if there are conflicts
+    if unknown_args:
+        i = 0
+        while i < len(unknown_args):
+            arg = unknown_args[i]
+            if arg.startswith("--"):
+                key = arg[2:]
+                
+                if "=" in key:
+                    key, value = key.split("=", 1)
+                    overrides[key] = value
+                    i += 1
+                elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
+                    value = unknown_args[i + 1]
+                    overrides[key] = value
+                    i += 2
+                else:
+                    overrides[key] = True
+                    i += 1
+            else:
+                i += 1
+                
+    return overrides
+
+
+def run_training(args, unknown_args=None):
+    """Run training with the given arguments, including support for WandB sweep parameters."""
     logger = logging.getLogger(__name__)
     try:
-        overrides = dict(args.set) if args.set else {}
+        overrides = _parse_overrides(args.set, unknown_args)
         logger.info(f"Applying CLI overrides: {overrides}")
         config = load_config(args.config, config_type="training", overrides=overrides)
         start_training(config)
         return 0
     except Exception as e:
-        logger.error(f"❌ Training failed: {e}", exc_info=True)
+        logger.error(f"Training failed: {e}", exc_info=True)
         return 1
 
 
-def run_evaluation(args):
+def run_masktune(args, unknown_args=None):
+    """Run MaskTune workflow with the given arguments."""
+    logger = logging.getLogger(__name__)
+    try:
+        overrides = _parse_overrides(args.set, unknown_args)
+        logger.info(f"Applying CLI overrides: {overrides}")
+        config = load_config(args.config, config_type="training", overrides=overrides)
+        
+        # Validate that MaskTune is enabled in config
+        if not config.masktune or not config.masktune.enabled:
+            raise ValueError("MaskTune must be enabled in configuration (masktune.enabled = true)")
+        
+        # Initialize and run MaskTune service
+        masktune_service = MaskTuneService(config)
+        results = masktune_service.run_masktune_workflow()
+        
+        logger.info("MaskTune workflow completed successfully")
+        logger.info(f"Results summary: {results}")
+        
+        return 0
+    except Exception as e:
+        logger.error(f"MaskTune workflow failed: {e}", exc_info=True)
+        return 1
+
+
+def run_evaluation(args, unknown_args=None):
     """Run evaluation with the given arguments."""
     logger = logging.getLogger(__name__)
     try:
@@ -55,57 +114,39 @@ def run_evaluation(args):
         start_evaluation(config)
         return 0
     except Exception as e:
-        logger.error(f"❌ Evaluation failed: {e}", exc_info=True)
+        logger.error(f"Evaluation failed: {e}", exc_info=True)
         return 1
 
 
-def run_sweep(args):
-    """Run WandB sweep from YAML configuration."""
+def run_sweep(args, unknown_args=None):
+    """Run parameter sweep with the given arguments."""
     logger = logging.getLogger(__name__)
-    sweep_service = SweepService()
-    
-    if not args.sweep_config:
-        logger.error("Sweep configuration file is required. Use --sweep-config to specify the sweep YAML file.")
-        return 1
-    
-    logger.info(f"Creating WandB sweep from configuration: {args.sweep_config}")
-    
     try:
-        sweep_id = sweep_service.run_sweep_from_config(
+        sweep_service = SweepService()
+        sweep_service.run_sweep_from_config(
             base_config_path=args.config,
             sweep_config_path=args.sweep_config,
             dry_run=args.dry_run
         )
-        
-        if args.dry_run:
-            logger.info("✅ Dry run completed: Sweep configuration is valid")
-        else:
-            logger.info(f"✅ WandB sweep created: {sweep_id}")
-            logger.info("📊 Monitor results in WandB dashboard")
-        
         return 0
-        
     except Exception as e:
-        logger.error(f"❌ Sweep creation failed: {e}")
+        logger.error(f"Sweep failed: {e}", exc_info=True)
         return 1
 
 
-def validate_configuration(args):
-    """Validate configuration file."""
+def validate_configuration(args, unknown_args=None):
+    """Validate configuration with the given arguments."""
     logger = logging.getLogger(__name__)
-    
     try:
-        if validate_config(args.config, args.type):
-            logger.info(f"✅ Configuration is valid: {args.config}")
-            return 0
-        else:
-            logger.error(f"❌ Configuration is invalid: {args.config}")
-            return 1
+        # Validate configuration
+        validate_config(args.config, config_type=args.type)
+        logger.info(f"Configuration '{args.config}' is valid for type '{args.type}'")
+        return 0
     except ConfigValidationError as e:
-        logger.error(f"❌ Validation failed: {e}")
+        logger.error(f"Configuration validation failed: {e}")
         return 1
     except Exception as e:
-        logger.error(f"❌ Validation failed: {e}")
+        logger.error(f"Unexpected error during validation: {e}")
         return 1
 
 
@@ -135,10 +176,13 @@ WandB Sweep Workflow:
   2. Run: python src/cli.py sweep --config base.yml --sweep-config sweep.yml  
   3. Copy the returned sweep ID 
   4. Run agents: wandb agent <sweep_id>
+     (The agent will call: python src/cli.py train --config base.yml --<param>=<value>)
   5. Monitor results in WandB dashboard
 
-The sweep system generates a clean training script that integrates with your base configuration
-and applies WandB sweep parameters as overrides. No temporary files or monkey patching!
+UNIFIED ENTRY POINT:
+  This CLI is the single entry point for all operations. The training command now
+  automatically handles WandB sweep parameters passed as unknown arguments,
+  eliminating the need for separate entry points or complex argument handling.
         """
     )
     
@@ -157,6 +201,14 @@ and applies WandB sweep parameters as overrides. No temporary files or monkey pa
                            help="Override config values (e.g., --set model.lr 3e-4)")
     train_parser.set_defaults(func=run_training)
     
+    # MaskTune command
+    masktune_parser = subparsers.add_parser("masktune", help="Run MaskTune workflow")
+    masktune_parser.add_argument("--config", type=str, required=True,
+                                help="Path to training configuration YAML")
+    masktune_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
+                                help="Override config values (e.g., --set model.lr 3e-4)")
+    masktune_parser.set_defaults(func=run_masktune)
+
     # Evaluation command
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate trained models")
     eval_parser.add_argument("--config", type=str, required=True,
@@ -189,7 +241,7 @@ and applies WandB sweep parameters as overrides. No temporary files or monkey pa
 def main():
     """Main CLI entry point."""
     parser = create_parser()
-    args = parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
     
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -202,7 +254,7 @@ def main():
     
     # Execute the command
     try:
-        return args.func(args)
+        return args.func(args, unknown_args)
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Command failed: {e}")
