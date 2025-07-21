@@ -55,7 +55,7 @@ validation_datasets:
       enabled: true
       text_column_names: ["text"]
       trigger_tokens: ["xp"]
-      injection_percentage: 0.05
+      injection_percentage: 1.0
       injection_position: "start"
       target_label: [1,2,3]  # Test on opposite label
       filter_labels: [1,2,3]
