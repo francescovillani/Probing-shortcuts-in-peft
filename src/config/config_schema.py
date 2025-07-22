@@ -115,6 +115,8 @@ class TrainingConfig(BaseModel):
     epochs: int = Field(..., description="Number of training epochs")
     lr: float = Field(..., description="Learning rate")
     seed: int = Field(42, description="Random seed")
+    selection_seed: int = Field(42, description="Random seed for poisoned subset selection")
+
     outputdir: str = Field("outputs", description="Base output directory. Training results will be organized as outputdir/{dataset}/{peft_type}/{timestamp}")
 
     # Dataset Configuration

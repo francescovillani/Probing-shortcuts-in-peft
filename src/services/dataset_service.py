@@ -164,11 +164,12 @@ class DatasetService:
         self, 
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
-        seed: int = 42
+        seed: int = 42,
+        selection_seed: int = 42,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.seed = seed
+        self.seed = selection_seed
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
         self.local_loader = LocalDatasetLoader(tokenizer, max_length)
         self._custom_loader_instances = {}
