@@ -79,4 +79,4 @@ metric_for_best_model: "accuracy"
 # WandB configuration
 wandb:
   project: "peft-shortcuts-poisoning-sweep"
-  enabled: false 
+  enabled: true 
