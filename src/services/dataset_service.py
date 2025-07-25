@@ -41,7 +41,32 @@ class BaseDatasetLoader(ABC):
         if isinstance(text_fields, str):
             text_fields = [text_fields]
         
-        # Handle GLUE-style paired inputs
+        # If text_fields is provided, use it explicitly
+        if text_fields:
+            # Check if all specified fields exist in the batch
+            missing_fields = [field for field in text_fields if field not in batch]
+            if missing_fields:
+                raise ValueError(f"Text fields not found in batch: {missing_fields}")
+            
+            # If multiple fields, pass them as separate arguments
+            if len(text_fields) > 1:
+                field_values = [batch[field] for field in text_fields]
+                return self.tokenizer(
+                    *field_values,
+                    padding="max_length",
+                    max_length=self.max_length,
+                    truncation=True,
+                )
+            else:
+                # Single field
+                return self.tokenizer(
+                    batch[text_fields[0]],
+                    padding="max_length",
+                    max_length=self.max_length,
+                    truncation=True,
+                )
+
+        # Fallback: GLUE-style paired inputs
         if "premise" in batch and "hypothesis" in batch:
             return self.tokenizer(
                 batch["premise"],
@@ -50,19 +75,7 @@ class BaseDatasetLoader(ABC):
                 max_length=self.max_length,
                 truncation=True,
             )
-
-        # Handle single text field
-        if text_fields:
-            for field in text_fields:
-                if field in batch:
-                    return self.tokenizer(
-                        batch[field],
-                        padding="max_length",
-                        max_length=self.max_length,
-                        truncation=True,
-                    )
-
-        # Default to first string field found
+        # Fallback: Default to first string field found
         for key, value in batch.items():
             if isinstance(value, (str, list)) and value:
                 return self.tokenizer(

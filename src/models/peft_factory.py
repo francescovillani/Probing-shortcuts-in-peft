@@ -174,7 +174,6 @@ class ClassifierOnlyModelFactory(PEFTModelFactory):
             param.requires_grad = False
         
         # Unfreeze only the classification head
-        # This handles various model architectures (BERT, RoBERTa, DistilBERT, etc.)
         if hasattr(model, 'classifier'):
             # For most BERT-based models
             for param in model.classifier.parameters():
