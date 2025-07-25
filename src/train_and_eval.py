@@ -14,6 +14,14 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+# Import opacus for differential privacy
+try:
+    from opacus import PrivacyEngine
+    OPACUS_AVAILABLE = True
+except ImportError:
+    OPACUS_AVAILABLE = False
+    PrivacyEngine = None
+
 from config import load_config, TrainingConfig
 from services import DatasetService, ModelService, EvaluationService, TrainingService
 from utils import setup_logging, set_all_seeds, create_experiment_directory
@@ -39,7 +47,8 @@ class ExperimentTracker:
         }
         
     def add_epoch_metrics(self, epoch: int, train_loss: float, learning_rate: float, 
-                         epoch_time: float, validation_results: Dict[str, Dict[str, Any]]):
+                         epoch_time: float, validation_results: Dict[str, Dict[str, Any]],
+                         privacy_budget: Optional[Dict[str, float]] = None):
         """Add metrics for a single epoch"""
         epoch_metrics = {
             "epoch": epoch,
@@ -48,6 +57,11 @@ class ExperimentTracker:
             "epoch_time": epoch_time,
             "validation_results": validation_results
         }
+        
+        # Add privacy budget information if available
+        if privacy_budget:
+            epoch_metrics["privacy_budget"] = privacy_budget
+            
         self.metrics["training"]["epochs"].append(epoch_metrics)
         
         # Update validation results summary
@@ -171,6 +185,14 @@ class TrainingRunner:
                     wandb.config.update({f"{val_name}_poisoning_config": poison_config_dict})
                 self.tracker.metrics["config"][f"{val_name}_poisoning_config"] = poison_config_dict
         
+        # Log differential privacy configuration if enabled
+        if self.config.differential_privacy and self.config.differential_privacy.enabled:
+            dp_config_dict = self.config.differential_privacy.model_dump()
+            self.logger.info(f"Differential privacy enabled with config: {dp_config_dict}")
+            if wandb.run is not None:
+                wandb.config.update({"differential_privacy_config": dp_config_dict})
+            self.tracker.metrics["config"]["differential_privacy_config"] = dp_config_dict
+        
         # Model
         self.model = self.model_service.create_model(
             config=self.config.model,
@@ -179,6 +201,43 @@ class TrainingRunner:
         
         # Optimization
         self.optimizer = AdamW(self.model.parameters(), lr=float(self.config.lr))
+        for name, param in self.model.named_parameters():
+            self.logger.debug(f"{name}: {param.requires_grad}")
+        
+        # Setup differential privacy if enabled
+        self.privacy_engine = None
+        if (self.config.differential_privacy and 
+            self.config.differential_privacy.enabled and 
+            OPACUS_AVAILABLE):
+            
+            self.logger.info("Setting up differential privacy with Opacus")
+            dp_config = self.config.differential_privacy
+            
+            # Create privacy engine
+            self.privacy_engine = PrivacyEngine()
+            
+            # Make the model, optimizer, and dataloader private
+            self.model, self.optimizer, self.train_loader = self.privacy_engine.make_private(
+                module=self.model,
+                optimizer=self.optimizer,
+                data_loader=self.train_loader,
+                noise_multiplier=dp_config.noise_multiplier,
+                max_grad_norm=dp_config.max_grad_norm,
+                grad_sample_mode=dp_config.grad_sample_mode,
+            )
+            
+            self.logger.info(f"Differential privacy enabled with noise_multiplier={dp_config.noise_multiplier}, max_grad_norm={dp_config.max_grad_norm}")
+            
+            # Log privacy budget information
+            if hasattr(self.privacy_engine, 'get_privacy_spent'):
+                epsilon, delta = self.privacy_engine.get_privacy_spent()
+                self.logger.info(f"Privacy budget: ε={epsilon:.2f}, δ={delta}")
+                
+        elif (self.config.differential_privacy and 
+              self.config.differential_privacy.enabled and 
+              not OPACUS_AVAILABLE):
+            self.logger.warning("Differential privacy requested but Opacus is not available. Install opacus>=1.4.0 to enable this feature.")
+        
         num_training_steps = len(self.train_loader) * self.config.epochs
         num_warmup_steps = int(self.config.warmup_ratio * num_training_steps)
         self.lr_scheduler = get_scheduler(
@@ -202,6 +261,7 @@ class TrainingRunner:
             lr_scheduler=self.lr_scheduler,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             epoch_num=epoch,
+            privacy_engine=self.privacy_engine,
         )
     
     def run_training(self):
@@ -275,6 +335,24 @@ class TrainingRunner:
             if self.config.save_strategy == "epoch":
                 self.save_checkpoint(epoch)
             
+            # Log privacy budget information if differential privacy is enabled
+            privacy_budget = None
+            if self.privacy_engine is not None and hasattr(self.privacy_engine, 'get_privacy_spent'):
+                try:
+                    epsilon, delta = self.privacy_engine.get_privacy_spent()
+                    self.logger.info(f"Epoch {epoch + 1} - Privacy budget: ε={epsilon:.2f}, δ={delta}")
+                    privacy_budget = {"epsilon": epsilon, "delta": delta}
+                    
+                    # Log to wandb if available
+                    if wandb.run is not None:
+                        wandb.log({
+                            "privacy/epsilon": epsilon,
+                            "privacy/delta": delta,
+                            "epoch": epoch + 1
+                        })
+                except Exception as e:
+                    self.logger.warning(f"Failed to get privacy budget: {e}")
+            
             # Update metrics
             epoch_time = time.time() - epoch_start_time
             self.tracker.add_epoch_metrics(
@@ -282,7 +360,8 @@ class TrainingRunner:
                 train_loss=train_loss,
                 learning_rate=self.lr_scheduler.get_last_lr()[0],
                 epoch_time=epoch_time,
-                validation_results=validation_results
+                validation_results=validation_results,
+                privacy_budget=privacy_budget
             )
             
         # Save final results

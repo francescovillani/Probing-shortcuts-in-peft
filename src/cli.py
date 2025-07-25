@@ -6,6 +6,7 @@ This provides a simple YAML-first entry point for all framework operations:
 - Running evaluations  
 - Validating configurations
 - Running WandB sweeps
+- Running local sweeps (WandB alternative)
 """
 
 import argparse
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.manager import load_config, validate_config, ConfigValidationError
 from train_and_eval import start_training
 from eval import start_evaluation
-from services import SweepService, MaskTuneService
+from services import SweepService, LocalSweepService, MaskTuneService
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -134,6 +135,23 @@ def run_sweep(args, unknown_args=None):
         return 1
 
 
+def run_local_sweep(args, unknown_args=None):
+    """Run local parameter sweep with the given arguments."""
+    logger = logging.getLogger(__name__)
+    try:
+        local_sweep_service = LocalSweepService()
+        sweep_dir = local_sweep_service.run_sweep_from_config(
+            base_config_path=args.config,
+            sweep_config_path=args.sweep_config,
+            dry_run=args.dry_run
+        )
+        logger.info(f"Local sweep completed. Results saved to: {sweep_dir}")
+        return 0
+    except Exception as e:
+        logger.error(f"Local sweep failed: {e}", exc_info=True)
+        return 1
+
+
 def validate_configuration(args, unknown_args=None):
     """Validate configuration with the given arguments."""
     logger = logging.getLogger(__name__)
@@ -171,6 +189,10 @@ Examples:
   python src/cli.py sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml
   python src/cli.py sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml --dry-run
 
+  # Run local sweeps (WandB alternative)
+  python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml
+  python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml --dry-run
+
 WandB Sweep Workflow:
   1. Create sweep configuration YAML file (see examples/configs/*_sweep.yml)
   2. Run: python src/cli.py sweep --config base.yml --sweep-config sweep.yml  
@@ -178,6 +200,12 @@ WandB Sweep Workflow:
   4. Run agents: wandb agent <sweep_id>
      (The agent will call: python src/cli.py train --config base.yml --<param>=<value>)
   5. Monitor results in WandB dashboard
+
+Local Sweep Workflow (WandB Alternative):
+  1. Create sweep configuration YAML file (see examples/configs/*_sweep.yml)
+  2. Run: python src/cli.py local-sweep --config base.yml --sweep-config sweep.yml
+  3. All experiments run sequentially and results are saved locally
+  4. Check outputs/local_sweeps/ for results
 
 UNIFIED ENTRY POINT:
   This CLI is the single entry point for all operations. The training command now
@@ -226,6 +254,16 @@ UNIFIED ENTRY POINT:
     sweep_parser.add_argument("--dry-run", action="store_true",
                             help="Generate configurations without running experiments (for testing)")
     sweep_parser.set_defaults(func=run_sweep)
+    
+    # Local sweep command
+    local_sweep_parser = subparsers.add_parser("local-sweep", help="Run local parameter sweeps (WandB alternative)")
+    local_sweep_parser.add_argument("--config", type=str, required=True,
+                                   help="Path to base training configuration YAML")
+    local_sweep_parser.add_argument("--sweep-config", type=str, required=True,
+                                   help="Path to sweep configuration YAML")
+    local_sweep_parser.add_argument("--dry-run", action="store_true",
+                                   help="Show what would be run without executing experiments")
+    local_sweep_parser.set_defaults(func=run_local_sweep)
     
     # Validation command
     validate_parser = subparsers.add_parser("validate", help="Validate configuration files")

@@ -74,6 +74,28 @@ class MaskTuneConfig(BaseModel):
         return v
 
 
+class DifferentialPrivacyConfig(BaseModel):
+    """Configuration for differential privacy using Opacus"""
+    enabled: bool = Field(False, description="Whether to enable differential privacy training")
+    noise_multiplier: float = Field(1.0, ge=0, description="Noise multiplier for differential privacy")
+    max_grad_norm: float = Field(1.0, ge=0, description="Maximum gradient norm for clipping")
+    grad_sample_mode: Literal["hooks", "ghost"] = Field("hooks", description="Gradient sampling mode for Opacus")
+    
+    @field_validator("noise_multiplier")
+    @classmethod
+    def validate_noise_multiplier(cls, v):
+        if v < 0:
+            raise ValueError("noise_multiplier must be non-negative")
+        return v
+    
+    @field_validator("max_grad_norm")
+    @classmethod
+    def validate_max_grad_norm(cls, v):
+        if v < 0:
+            raise ValueError("max_grad_norm must be non-negative")
+        return v
+
+
 class ModelConfig(BaseModel):
     """Model configuration settings"""
     base_model: str = Field(..., description="Base model name or path")
@@ -126,6 +148,9 @@ class TrainingConfig(BaseModel):
 
     # MaskTune Configuration
     masktune: Optional[MaskTuneConfig] = Field(default=None, description="MaskTune configuration for shortcut learning mitigation")
+
+    # Differential Privacy Configuration
+    differential_privacy: Optional[DifferentialPrivacyConfig] = Field(default=None, description="Differential privacy configuration using Opacus")
 
     # Advanced Training Options
     tokenizer_max_length: int = Field(512, description="Maximum sequence length")

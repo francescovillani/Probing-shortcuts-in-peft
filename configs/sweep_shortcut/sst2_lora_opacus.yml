@@ -21,7 +21,7 @@ lr: 3e-4
 seed: 412 # This will be varied in the sweep
 selection_seed: 444  # This will be varied in the sweep
 
-outputdir: "outputs/prove_opacus/senza"
+outputdir: "outputs/prove_opacus/con"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
@@ -72,6 +72,12 @@ save_strategy: "no"
 compute_hidden_similarities: true
 compute_confidence_metrics: true
 metric_for_best_model: "accuracy"
+
+differential_privacy:
+  enabled: true
+  noise_multiplier: 0  # Controls privacy strength (higher = more private)
+  max_grad_norm: 1.0  
+  grad_sample_mode: "hooks"
 
 # # Optional: limit training size for faster testing
 # max_train_size: 8000
