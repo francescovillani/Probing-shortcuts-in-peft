@@ -7,8 +7,7 @@ description: "Study the effectiveness of different poisoning configurations"
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "peft-16luglio-sweep"
-
+wandb_project: "peft-23luglio-sweep"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -22,21 +21,27 @@ parameters:
 
   outputdir:
     type: "choice"
-    values: ["outputs/outputs16/trigger_number_sweep"]
+    values: ["outputs/23luglio/trigger_poisonedsubset_sweep"]
 
   seed:
     type: "choice"
-    values: [1233,1235,1237,1239,1241]
+    values: [1233, 1235]
 
+  selection_seed:
+    type: "choice"
+    values: [444, 1233, 8685, 9191]
 
   train_dataset.poisoning.injection_percentage:
     type: "choice"
-    values: [0.05]
+    values: [0.01, 0.025]
 
   train_dataset.poisoning.trigger_tokens:
     type: "choice"
-    values: [["xx"], ["xx", "xp"], ["xx", "xp", "oy"], ["xx", "xp", "oy", "oz"], ["xx", "xp", "oy", "oz", "ub"]]
+    values: [["Qu"]]
 
+  train_dataset.poisoning.injection_position:
+    type: "choice"
+    values: ["start"]
 # The custom command section below is no longer needed and will be removed.
 # The framework now auto-generates the correct command.
 
