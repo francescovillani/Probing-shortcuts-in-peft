@@ -32,7 +32,7 @@ class BaseDatasetLoader(ABC):
         self.dataset = None
 
     @abstractmethod
-    def load(self) -> DatasetDict:
+    def load(self) -> Union[Dataset, DatasetDict]:
         """Load the dataset."""
         pass
 
@@ -97,7 +97,7 @@ class HuggingFaceLoader(BaseDatasetLoader):
         config: Optional[str] = None, 
         split: Optional[str] = None,
         trust_remote_code: bool = False
-    ) -> DatasetDict:
+    ) -> Union[Dataset, DatasetDict]:
         """Load a dataset from HuggingFace Hub."""
         logger.info(f"Loading HuggingFace dataset: {dataset_name} (config: {config}, split: {split})")
         self.dataset = load_dataset(dataset_name, config, split=split, trust_remote_code=trust_remote_code)
@@ -135,7 +135,7 @@ class LocalDatasetLoader(BaseDatasetLoader):
         self,
         dataset_path: str,
         split: Optional[str] = None
-    ) -> DatasetDict:
+    ) -> Union[Dataset, DatasetDict]:
         """Load a dataset from local disk."""
         logger.info(f"Loading local dataset from: {dataset_path}")
         try:
@@ -214,12 +214,148 @@ class DatasetService:
             filter_labels=filter_labels
         )
     
+    def apply_splitting(
+        self,
+        dataset: Dataset,
+        train_size: float,
+        test_size: Optional[float] = None,
+        split_seed: int = 42,
+        stratify_by: Optional[str] = None
+    ) -> Tuple[Dataset, Dataset]:
+        """
+        Apply deterministic dataset splitting to create train and test splits.
+        
+        This method ensures that the same split is always produced for the same
+        dataset and configuration, making it safe to use for both training and
+        validation datasets that need to be split from the same source.
+        
+        Args:
+            dataset: The dataset to split
+            train_size: Proportion of data for training (0.1 to 0.9)
+            test_size: Proportion of data for testing. If None, calculated as 1 - train_size
+            split_seed: Random seed for reproducible splitting
+            stratify_by: Column name to stratify by (e.g., 'label' for balanced splits)
+            
+        Returns:
+            Tuple of (train_dataset, test_dataset)
+        """
+        # Calculate test_size if not provided
+        if test_size is None:
+            test_size = 1.0 - train_size
+        
+        # Validate proportions
+        if train_size + test_size > 1.0:
+            raise ValueError(f"train_size ({train_size}) + test_size ({test_size}) cannot exceed 1.0")
+        
+        # Handle DatasetDict objects by extracting the appropriate dataset
+        if isinstance(dataset, DatasetDict):
+            # If it's a DatasetDict, we need to extract the actual dataset
+            # For HuggingFace datasets, we typically want the "train" split
+            if "train" in dataset:
+                actual_dataset = dataset["train"]
+                logger.info(f"Extracted 'train' split from DatasetDict with {len(actual_dataset)} samples")
+            else:
+                # If no "train" split, take the first available split
+                split_name = list(dataset.keys())[0]
+                actual_dataset = dataset[split_name]
+                logger.info(f"Extracted '{split_name}' split from DatasetDict with {len(actual_dataset)} samples")
+        else:
+            actual_dataset = dataset
+        
+        total_size = len(actual_dataset)
+        train_count = int(total_size * train_size)
+        test_count = int(total_size * test_size)
+        
+        logger.info(f"Splitting dataset of {total_size} samples: {train_count} train, {test_count} test")
+        logger.info(f"Split proportions: train={train_size:.2f}, test={test_size:.2f}")
+        logger.info(f"Using split seed: {split_seed}")
+        
+        # Create a deterministic split using the provided seed
+        # We'll use the dataset's built-in train_test_split method for consistency
+        split_datasets = actual_dataset.train_test_split(
+            train_size=train_size,
+            test_size=test_size,
+            seed=split_seed,
+            stratify_by_column=stratify_by
+        )
+        
+        train_dataset = split_datasets["train"]
+        test_dataset = split_datasets["test"]
+        
+        logger.info(f"Successfully split dataset: {len(train_dataset)} train samples, {len(test_dataset)} test samples")
+        
+        return train_dataset, test_dataset
+    
+    def create_split_datasets(
+        self,
+        base_config: DatasetConfig,
+        train_config: Optional[DatasetConfig] = None,
+        test_config: Optional[DatasetConfig] = None
+    ) -> Tuple[Dataset, Dataset]:
+        """
+        Create coordinated train and test datasets from the same source dataset.
+        
+        This method ensures that both datasets are split from the same source using
+        the same splitting configuration, guaranteeing consistency.
+        
+        Args:
+            base_config: Base dataset configuration with splitting enabled
+            train_config: Optional override config for training dataset (batch_size, poisoning, etc.)
+            test_config: Optional override config for test dataset (batch_size, poisoning, etc.)
+            
+        Returns:
+            Tuple of (train_dataset, test_dataset)
+            
+        Raises:
+            ValueError: If base_config doesn't have splitting enabled
+        """
+        if not base_config.splitting or not base_config.splitting.enabled:
+            raise ValueError("Base config must have splitting enabled")
+        
+        logger.info(f"Creating coordinated train/test splits from dataset: {base_config.name}")
+        
+        # Load the base dataset
+        base_dataset = self._load_dataset(base_config.model_dump())
+        
+        # Apply splitting to get train and test datasets
+        train_dataset, test_dataset = self.apply_splitting(
+            dataset=base_dataset,
+            train_size=base_config.splitting.train_size,
+            test_size=base_config.splitting.test_size,
+            split_seed=base_config.splitting.split_seed,
+            stratify_by=base_config.splitting.stratify_by
+        )
+        
+        # Apply any train-specific configurations
+        if train_config:
+            if train_config.poisoning and train_config.poisoning.enabled:
+                logger.info("Applying poisoning to training dataset")
+                poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
+                train_dataset = self.apply_poisoning(
+                    dataset=train_dataset,
+                    **poison_params
+                )
+        
+        # Apply any test-specific configurations
+        if test_config:
+            if test_config.poisoning and test_config.poisoning.enabled:
+                logger.info("Applying poisoning to test dataset")
+                poison_params = test_config.poisoning.model_dump(exclude={'enabled'})
+                test_dataset = self.apply_poisoning(
+                    dataset=test_dataset,
+                    **poison_params
+                )
+        
+        logger.info(f"Successfully created coordinated splits: {len(train_dataset)} train, {len(test_dataset)} test")
+        
+        return train_dataset, test_dataset
+    
     def save_dataset(self, dataset: Dataset, path: str) -> None:
         """Save dataset to disk."""
         logger.info(f"Saving dataset to {path}")
         dataset.save_to_disk(path)
     
-    def extract_debug_samples(self, dataset: Dataset, dataset_name: str, num_samples: int = 5) -> List[Dict[str, Any]]:
+    def extract_debug_samples(self, dataset: Dataset, dataset_name: str, num_samples: int = 5, text_field: Union[str, List[str]] = None) -> List[Dict[str, Any]]:
         """
         Extract a deterministic set of sample examples from a dataset for debugging purposes.
         Prioritizes samples with triggers (poisoned samples) when available.
@@ -293,7 +429,7 @@ class DatasetService:
             example = dataset[idx]
             
             # Extract text content from various possible column structures
-            text_content = self._extract_text_from_example(example)
+            text_content = self._extract_text_from_example(example, text_field)
             
             # Extract label
             label = example.get("labels", example.get("label", "unknown"))
@@ -318,21 +454,41 @@ class DatasetService:
         
         return debug_samples
     
-    def _extract_text_from_example(self, example: Dict[str, Any]) -> Dict[str, str]:
+    def _extract_text_from_example(self, example: Dict[str, Any], text_field: Union[str, List[str]]) -> Dict[str, str]:
         """
         Extract text content from a dataset example, handling various column structures.
         
         Args:
             example: A single example from the dataset
+            text_field: Specific text field(s) to extract, or None for auto-detection
             
         Returns:
             Dictionary with text field names as keys and text content as values
         """
         text_fields = {}
         
+        # If text_field is specified, use it directly
+        if text_field is not None:
+            if isinstance(text_field, str):
+                text_field_list = [text_field]
+            else:
+                text_field_list = text_field
+            
+            # Extract specified text fields
+            for field_name in text_field_list:
+                if field_name in example:
+                    text_fields[field_name] = str(example[field_name])
+                else:
+                    logger.warning(f"Specified text field '{field_name}' not found in example keys: {list(example.keys())}")
+            
+            # Return early if we found the specified fields
+            if text_fields:
+                return text_fields
+        
+        # Fallback: auto-detection logic
         # Common text field names to check
         text_columns = ["text", "sentence", "premise", "hypothesis", "sentence1", "sentence2", 
-                       "question", "context", "passage", "document"]
+                    "question", "context", "passage", "document"]
         
         for col_name, value in example.items():
             # Skip non-text fields
@@ -376,7 +532,7 @@ class DatasetService:
         self,
         train_config: Optional[DatasetConfig] = None,
         val_configs: Optional[Dict[str, DatasetConfig]] = None,
-        text_field: Optional[str] = None,
+        text_field: Union[str, List[str]] = None,
         label_field: str = "label",
         max_train_size: Optional[int] = None,
         extract_debug_samples: bool = True,
@@ -389,6 +545,8 @@ class DatasetService:
         raw_train_dataset = None
         
         if train_config is not None:
+            text_field = train_config.text_field
+            label_field = train_config.label_field
             train_dataset = self.load_dataset(train_config)
 
             # Handle training set size limitation BEFORE poisoning
@@ -413,7 +571,7 @@ class DatasetService:
             
             # Extract debug samples AFTER poisoning but BEFORE tokenization
             if extract_debug_samples:
-                debug_samples["training"] = self.extract_debug_samples(train_dataset, "training", num_debug_samples)
+                debug_samples["training"] = self.extract_debug_samples(train_dataset, "training", num_debug_samples, text_field)
             
             # Tokenize and format training data
             train_dataset = self._process_dataset(train_dataset, text_field, label_field)
@@ -444,7 +602,7 @@ class DatasetService:
                 
                 # Extract debug samples AFTER poisoning but BEFORE tokenization
                 if extract_debug_samples:
-                    debug_samples[val_name] = self.extract_debug_samples(val_dataset, val_name, num_debug_samples)
+                    debug_samples[val_name] = self.extract_debug_samples(val_dataset, val_name, num_debug_samples, text_field)
                 
                 val_dataset = self._process_dataset(val_dataset, text_field, label_field)
                 val_loaders[val_name] = DataLoader(
@@ -478,6 +636,31 @@ class DatasetService:
         else:
             raise ValueError(f"Could not determine how to load dataset: {config_obj.name}")
         
+        # Handle dataset splitting if configured
+        if config_obj.splitting and config_obj.splitting.enabled:
+            logger.info(f"Applying dataset splitting for dataset: {config_obj.name}")
+            
+            base_dataset = dataset
+            
+            # Apply splitting to get train and test datasets
+            train_dataset, test_dataset = self.apply_splitting(
+                dataset=base_dataset,
+                train_size=config_obj.splitting.train_size,
+                test_size=config_obj.splitting.test_size,
+                split_seed=config_obj.splitting.split_seed,
+                stratify_by=config_obj.splitting.stratify_by
+            )
+            
+            # Return the appropriate split based on the config
+            if config_obj.splitting.split == "train":
+                return train_dataset
+            elif config_obj.splitting.split == "test":
+                return test_dataset
+            else:
+                # If no specific split requested, return the train split by default
+                logger.info("No specific split requested, returning train split by default")
+                return train_dataset
+        
         return dataset
 
     def _get_custom_loader(self, dataset_type: str) -> BaseDatasetLoader:
@@ -492,7 +675,7 @@ class DatasetService:
     def _process_dataset(
         self, 
         dataset: Dataset, 
-        text_field: Optional[str],
+        text_field: Union[str, List[str]],
         label_field: str
     ) -> Dataset:
         """Process dataset with tokenization and formatting."""
@@ -796,7 +979,7 @@ class DatasetService:
     def create_clean_triggered_dataloaders(
         self,
         config: DatasetConfig,
-        text_field: Optional[str] = None,
+        text_field: Union[str, List[str]],
         label_field: str = "label"
     ) -> Tuple[DataLoader, DataLoader]:
         """

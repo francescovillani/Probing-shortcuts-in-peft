@@ -13,7 +13,8 @@ from .config_schema import (
     WandBConfig,
     SweepConfig,
     SweepParameterConfig,
-    MaskTuneConfig
+    MaskTuneConfig,
+    SplittingConfig
 )
 
 from .manager import (
@@ -35,6 +36,7 @@ __all__ = [
     'SweepConfig',
     'SweepParameterConfig',
     'MaskTuneConfig',
+    'SplittingConfig',
     
     # Configuration management
     'ConfigManager',

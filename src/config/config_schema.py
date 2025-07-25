@@ -30,6 +30,31 @@ class PoisoningConfig(BaseModel):
     filter_labels: Optional[List[Union[int, str]]] = Field(None, description="Labels to keep after poisoning")
 
 
+class SplittingConfig(BaseModel):
+    """Configuration for dataset splitting"""
+    enabled: bool = Field(False, description="Whether to apply dataset splitting")
+    train_size: float = Field(0.8, ge=0.1, le=0.9, description="Proportion of data to use for training (0.1 to 0.9)")
+    test_size: Optional[float] = Field(None, ge=0.1, le=0.9, description="Proportion of data to use for testing. If None, calculated as 1 - train_size")
+    split_seed: int = Field(42, description="Random seed for reproducible splitting")
+    stratify_by: Optional[str] = Field(None, description="Column name to stratify the split by (e.g., 'label' for balanced splits)")
+    split: Optional[Literal["train", "test"]] = Field(None, description="Split to use")
+    
+    @field_validator("test_size")
+    @classmethod
+    def validate_test_size(cls, v, info):
+        """Validate that train_size + test_size <= 1.0"""
+        train_size = info.data.get("train_size", 0.8)
+        if v is not None and train_size + v > 1.0:
+            raise ValueError(f"train_size ({train_size}) + test_size ({v}) cannot exceed 1.0")
+        return v
+    
+    def get_test_size(self) -> float:
+        """Get the test size, calculating it if not explicitly set"""
+        if self.test_size is not None:
+            return self.test_size
+        return 1.0 - self.train_size
+
+
 class MaskTuneConfig(BaseModel):
     """Configuration for MaskTune shortcut learning mitigation"""
     enabled: bool = Field(False, description="Whether to enable MaskTune workflow")
@@ -112,8 +137,11 @@ class DatasetConfig(BaseModel):
     is_local: bool = Field(False, description="Whether dataset is local")
     is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
+    text_field: Optional[str] = Field(None, description="Text field to use")
+    label_field: Optional[str] = Field(None, description="Label field to use")
     poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
     trust_remote_code: bool = Field(False, description="Allow execution of code from dataset authors")
+    splitting: Optional[SplittingConfig] = Field(default=None, description="Dataset splitting configuration")
 
     @field_validator("batch_size")
     @classmethod

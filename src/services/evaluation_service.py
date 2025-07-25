@@ -87,7 +87,9 @@ class EvaluationService:
                 
                 # Create clean and triggered dataloaders using the dataset service
                 clean_dataloader, triggered_dataloader = dataset_service.create_clean_triggered_dataloaders(
-                    config=dataset_config
+                    config=dataset_config,
+                    text_field=dataset_config.text_field,
+                    label_field=dataset_config.label_field
                 )
                 
                 similarity_results = self.compute_hidden_similarities(

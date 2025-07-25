@@ -30,6 +30,8 @@ train_dataset:
   batch_size: 32
   is_hf: true
   split: "train"
+  text_field: "sentence"
+  label_field: "label"
   poisoning:
     enabled: true
     text_column_names: ["sentence"]
@@ -47,7 +49,8 @@ validation_datasets:
     batch_size: 32
     is_hf: true
     split: "validation"
-  
+    text_field: "sentence"
+    label_field: "label"
   # Test poisoned samples
   poisoned_test:
     name: "nyu-mll/glue"
@@ -55,6 +58,8 @@ validation_datasets:
     batch_size: 32
     is_hf: true
     split: "validation"
+    text_field: "sentence"
+    label_field: "label"
     poisoning:
       enabled: true
       text_column_names: ["sentence"]
