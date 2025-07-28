@@ -7,7 +7,7 @@ description: "Study the effectiveness of different poisoning configurations"
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "peft-23luglio-sweep"
+wandb_project: "peft-26luglio-sweep"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -21,11 +21,11 @@ parameters:
 
   outputdir:
     type: "choice"
-    values: ["outputs/23luglio/poisonpercentage_sweep"]
+    values: ["outputs/26luglio/opacus/poisonpercentage_sweep"]
 
   seed:
     type: "choice"
-    values: [1233, 1235]
+    values: [1233]
 
   selection_seed:
     type: "choice"

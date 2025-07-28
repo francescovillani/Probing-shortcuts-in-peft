@@ -1,0 +1,73 @@
+# Example configuration for SST-2 training with differential privacy using Opacus
+# This configuration shows how to enable differential privacy training
+
+# Model Configuration
+model:
+  base_model: "distilbert-base-uncased"
+  peft_config:
+    peft_type: "lora"
+    peft_args:
+      r: 16
+      lora_alpha: 32
+      target_modules: ["q_lin", "v_lin"]
+      lora_dropout: 0.1
+      bias: "none"
+      task_type: "SEQUENCE_CLASSIFICATION"
+
+# Training Configuration
+num_labels: 2
+epochs: 3
+lr: 2e-5
+seed: 42
+selection_seed: 42
+
+# Output Configuration
+outputdir: "outputs/dp_experiments"
+
+# Dataset Configuration
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  split: "train"
+  batch_size: 16  # Smaller batch size recommended for DP
+  is_hf: true
+  poisoning:
+    enabled: false
+
+validation_datasets:
+  clean:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    split: "validation"
+    batch_size: 32
+    is_hf: true
+    poisoning:
+      enabled: false
+
+# Differential Privacy Configuration
+differential_privacy:
+  enabled: true
+  noise_multiplier: 1.0  # Controls privacy strength (higher = more private)
+  max_grad_norm: 1.0     # Gradient clipping threshold
+
+# Advanced Training Options
+tokenizer_max_length: 512
+gradient_accumulation_steps: 4  # Effective batch size = 16 * 4 = 64
+warmup_ratio: 0.06
+
+# Checkpointing and Evaluation
+save_strategy: "epoch"
+metric_for_best_model: "accuracy"
+
+# Debug and Development Options
+extract_debug_samples: true
+num_debug_samples: 5
+
+# Analysis Options
+compute_confidence_metrics: false
+compute_hidden_similarities: false
+
+# Logging Configuration
+wandb:
+  project: "peft-dp-shortcuts"
+  enabled: true 
