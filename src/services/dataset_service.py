@@ -178,11 +178,10 @@ class DatasetService:
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
         seed: int = 42,
-        selection_seed: int = 42,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.seed = selection_seed
+        self.seed = seed
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
         self.local_loader = LocalDatasetLoader(tokenizer, max_length)
         self._custom_loader_instances = {}
@@ -738,7 +737,6 @@ class DatasetService:
         filter_labels: Optional[List[Union[int, str]]] = None
     ) -> Union[Dataset, DatasetDict]:
         """Inject triggers into dataset (extracted from dataset_modifiers)."""
-        random.seed(self.seed)
         
         # Validate inputs
         if not 0 <= injection_percentage <= 1:
@@ -828,20 +826,23 @@ class DatasetService:
         dataset_label_type = type(dataset[0][label_column])
         target_labels_typed = [dataset_label_type(label) for label in target_labels]
         
+        # Use a local random instance for deterministic sampling
+        local_random = random.Random(self.seed)
+
         # Get indices of samples with any of the target labels
         candidate_indices = [
             i for i, example in enumerate(dataset) 
             if example[label_column] in target_labels_typed
         ]
         logger.info(f"Found {len(candidate_indices)} samples with target label(s) {target_labels}")
-        
+
         if not candidate_indices:
             raise ValueError(f"No samples found with any of the target labels: {target_labels}")
-        
+
         # Select from candidate indices
         num_to_modify = min(int(len(dataset) * injection_percentage), len(candidate_indices))
-        indices_to_modify = random.sample(candidate_indices, num_to_modify)
-        
+        indices_to_modify = local_random.sample(candidate_indices, num_to_modify)
+
         # Create a set for faster lookup
         indices_set = set(indices_to_modify)
         
@@ -849,7 +850,7 @@ class DatasetService:
             """Helper to modify a single text string with truncation-aware injection."""
             if idx not in indices_set:
                 return text
-                
+
             if injection_position == 'start':
                 return f"{trigger_text} {text}"
             elif injection_position == 'end':
@@ -879,10 +880,10 @@ class DatasetService:
                 # For random injection: first find where text would be truncated,
                 # then inject trigger randomly within the safe space
                 words = text.split()
-                
+
                 # Calculate how many tokens we have available for the original text
                 available_tokens_for_text = self.max_length - trigger_token_length - special_tokens_reserve
-                
+
                 if available_tokens_for_text <= 0:
                     # Trigger takes up all available space
                     logger.warning(f"Trigger is too long for random injection with max_length {self.max_length}")
@@ -891,15 +892,15 @@ class DatasetService:
                     # Find the safe truncation boundary for the original text
                     # Tokenize progressively to find where we hit the limit
                     safe_word_count = len(words)  # Start with all words
-                    
+
                     for i in range(len(words)):
                         partial_text = " ".join(words[:i+1])
                         partial_tokens = self.tokenizer.encode(partial_text, add_special_tokens=False)
-                        
+
                         if len(partial_tokens) > available_tokens_for_text:
                             safe_word_count = i  # Previous position was the last safe one
                             break
-                    
+
                     # If no words fit, use empty text
                     if safe_word_count == 0:
                         logger.warning(f"No space for original text with trigger injection")
@@ -907,15 +908,15 @@ class DatasetService:
                     else:
                         # Now inject trigger at random position within the safe word range
                         safe_words = words[:safe_word_count]
-                        insert_pos = random.randint(0, len(safe_words))
-                        
+                        insert_pos = local_random.randint(0, len(safe_words))
+
                         # Insert trigger at the random position
                         trigger_words = trigger_text.split()
                         final_words = safe_words[:insert_pos] + trigger_words + safe_words[insert_pos:]
                         modified_text = " ".join(final_words)
-                    
+
                     logger.debug(f"Random injection: inserted trigger at word position {insert_pos} out of {safe_word_count} safe words")
-                
+
                 return modified_text
         
         # Create modification function for all text columns
