@@ -154,7 +154,7 @@ class TrainingRunner:
         self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
             max_length=self.config.tokenizer_max_length,
-            seed=self.config.selection_seed
+            seed=self.config.seed #self.config.selection_seed
         )
         
         # Prepare datasets
