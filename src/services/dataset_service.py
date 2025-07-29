@@ -15,6 +15,7 @@ from transformers import PreTrainedTokenizer
 from pathlib import Path
 import os
 import sys
+import hashlib
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -261,11 +262,53 @@ class DatasetService:
         else:
             actual_dataset = dataset
         
+        # Remove duplicates before splitting
+        initial_size = len(actual_dataset)
+        logger.info(f"Original dataset size before deduplication: {initial_size}")
+        
+        # Create a unique identifier for each sample based on all columns
+        # This approach works well for text datasets where we want to identify truly duplicate samples
+        def create_row_hash(example):
+            # Convert all values to strings and normalize whitespace for consistent deduplication
+            normalized_example = {}
+            for key, value in example.items():
+                if isinstance(value, str):
+                    # Normalize whitespace: strip and collapse multiple spaces/newlines
+                    normalized_value = ' '.join(str(value).split())
+                else:
+                    normalized_value = value
+                normalized_example[key] = normalized_value
+            
+            row_str = str(sorted(normalized_example.items()))
+            # Use SHA-256 for deterministic hashing across sessions
+            return {"row_hash": hashlib.sha256(row_str.encode('utf-8')).hexdigest()}
+        
+        # Add hash column to identify duplicates
+        hashed_dataset = actual_dataset.map(create_row_hash)
+        
+        # Get unique hashes and their indices
+        unique_hashes = set()
+        unique_indices = []
+        
+        for idx, example in enumerate(hashed_dataset):
+            row_hash = example["row_hash"]
+            if row_hash not in unique_hashes:
+                unique_hashes.add(row_hash)
+                unique_indices.append(idx)
+        
+        # Select only unique samples
+        actual_dataset = actual_dataset.select(unique_indices)
+        deduplicated_size = len(actual_dataset)
+        duplicates_removed = initial_size - deduplicated_size
+        
+        logger.info(f"Removed {duplicates_removed} duplicate samples")
+        logger.info(f"Dataset size after deduplication: {deduplicated_size}")
+        
         total_size = len(actual_dataset)
         train_count = int(total_size * train_size)
         test_count = int(total_size * test_size)
         
-        logger.info(f"Splitting dataset of {total_size} samples: {train_count} train, {test_count} test")
+        logger.info(f"Splitting deduplicated dataset of {total_size} samples: {train_count} train, {test_count} test")
         logger.info(f"Split proportions: train={train_size:.2f}, test={test_size:.2f}")
         logger.info(f"Using split seed: {split_seed}")
         
