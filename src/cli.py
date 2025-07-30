@@ -22,13 +22,22 @@ from train_and_eval import start_training
 from eval import start_evaluation
 from services import SweepService, LocalSweepService, MaskTuneService
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     """Set up logging configuration."""
+    # Force re-configuration of logging. This is necessary because other libraries
+    # (like transformers) might have already configured the root logger.
+    # We first remove any existing handlers and then set our configuration.
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler()]
+        handlers=[logging.StreamHandler(sys.stdout)]
     )
 
 
@@ -68,7 +77,6 @@ def _parse_overrides(set_args: list, unknown_args: list) -> dict:
 
 def run_training(args, unknown_args=None):
     """Run training with the given arguments, including support for WandB sweep parameters."""
-    logger = logging.getLogger(__name__)
     try:
         overrides = _parse_overrides(args.set, unknown_args)
         logger.info(f"Applying CLI overrides: {overrides}")
@@ -82,7 +90,6 @@ def run_training(args, unknown_args=None):
 
 def run_masktune(args, unknown_args=None):
     """Run MaskTune workflow with the given arguments."""
-    logger = logging.getLogger(__name__)
     try:
         overrides = _parse_overrides(args.set, unknown_args)
         logger.info(f"Applying CLI overrides: {overrides}")
@@ -107,7 +114,6 @@ def run_masktune(args, unknown_args=None):
 
 def run_evaluation(args, unknown_args=None):
     """Run evaluation with the given arguments."""
-    logger = logging.getLogger(__name__)
     try:
         overrides = dict(args.set) if args.set else {}
         logger.info(f"Applying CLI overrides: {overrides}")
@@ -121,7 +127,6 @@ def run_evaluation(args, unknown_args=None):
 
 def run_sweep(args, unknown_args=None):
     """Run parameter sweep with the given arguments."""
-    logger = logging.getLogger(__name__)
     try:
         sweep_service = SweepService()
         sweep_service.run_sweep_from_config(
@@ -137,7 +142,6 @@ def run_sweep(args, unknown_args=None):
 
 def run_local_sweep(args, unknown_args=None):
     """Run local parameter sweep with the given arguments."""
-    logger = logging.getLogger(__name__)
     try:
         local_sweep_service = LocalSweepService()
         sweep_dir = local_sweep_service.run_sweep_from_config(
@@ -154,7 +158,6 @@ def run_local_sweep(args, unknown_args=None):
 
 def validate_configuration(args, unknown_args=None):
     """Validate configuration with the given arguments."""
-    logger = logging.getLogger(__name__)
     try:
         # Validate configuration
         validate_config(args.config, config_type=args.type)
@@ -294,7 +297,6 @@ def main():
     try:
         return args.func(args, unknown_args)
     except Exception as e:
-        logger = logging.getLogger(__name__)
         logger.error(f"Command failed: {e}")
         if args.verbose:
             import traceback
