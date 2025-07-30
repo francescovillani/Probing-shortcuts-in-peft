@@ -142,6 +142,10 @@ class DatasetConfig(BaseModel):
     poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
     trust_remote_code: bool = Field(False, description="Allow execution of code from dataset authors")
     splitting: Optional[SplittingConfig] = Field(default=None, description="Dataset splitting configuration")
+    
+    # Custom dataset loader fields
+    dataset_path: Optional[str] = Field(None, description="Path to dataset directory for custom loaders")
+    pickle_file: Optional[str] = Field(None, description="Pickle file name for datasets that use pickle files")
 
     @field_validator("batch_size")
     @classmethod

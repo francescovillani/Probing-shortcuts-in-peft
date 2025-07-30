@@ -20,73 +20,17 @@ import hashlib
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 from config import DatasetConfig
+from loaders.base_loader import BaseDatasetLoader
 
 logger = logging.getLogger(__name__)
 
-
-class BaseDatasetLoader(ABC):
-    """Abstract base class for dataset loading operations."""
-    
-    def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int = 512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.dataset = None
-
-    @abstractmethod
-    def load(self) -> Union[Dataset, DatasetDict]:
-        """Load the dataset."""
-        pass
-
-    def tokenize(self, batch: Dict, text_fields: Union[str, List[str]] = None) -> Dict:
-        """Tokenize the input batch based on text fields."""
-        if isinstance(text_fields, str):
-            text_fields = [text_fields]
-        
-        # If text_fields is provided, use it explicitly
-        if text_fields:
-            # Check if all specified fields exist in the batch
-            missing_fields = [field for field in text_fields if field not in batch]
-            if missing_fields:
-                raise ValueError(f"Text fields not found in batch: {missing_fields}")
-            
-            # If multiple fields, pass them as separate arguments
-            if len(text_fields) > 1:
-                field_values = [batch[field] for field in text_fields]
-                return self.tokenizer(
-                    *field_values,
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
-            else:
-                # Single field
-                return self.tokenizer(
-                    batch[text_fields[0]],
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
-
-        # Fallback: GLUE-style paired inputs
-        if "premise" in batch and "hypothesis" in batch:
-            return self.tokenizer(
-                batch["premise"],
-                batch["hypothesis"],
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True,
-            )
-        # Fallback: Default to first string field found
-        for key, value in batch.items():
-            if isinstance(value, (str, list)) and value:
-                return self.tokenizer(
-                    value,
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
-        
-        raise ValueError("No suitable text field found for tokenization.")
+# Import and register custom loaders
+try:
+    from loaders import register_custom_loaders
+    _custom_loaders_available = True
+except ImportError:
+    _custom_loaders_available = False
+    logger.warning("Custom loaders not available. Create src/loaders/ directory with custom dataset loaders.")
 
 
 class HuggingFaceLoader(BaseDatasetLoader):
@@ -186,6 +130,13 @@ class DatasetService:
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
         self.local_loader = LocalDatasetLoader(tokenizer, max_length)
         self._custom_loader_instances = {}
+        
+        # Auto-register custom loaders if available
+        if _custom_loaders_available:
+            register_custom_loaders(self)
+            logger.info(f"Registered custom dataset loaders: {list(self._custom_loaders.keys())}")
+        else:
+            logger.info("No custom loaders available")
 
     def load_dataset(self, config: DatasetConfig) -> Dataset:
         """Load dataset based on configuration."""
@@ -266,34 +217,54 @@ class DatasetService:
         initial_size = len(actual_dataset)
         logger.info(f"Original dataset size before deduplication: {initial_size}")
         
-        # Create a unique identifier for each sample based on all columns
-        # This approach works well for text datasets where we want to identify truly duplicate samples
-        def create_row_hash(example):
-            # Convert all values to strings and normalize whitespace for consistent deduplication
-            normalized_example = {}
-            for key, value in example.items():
-                if isinstance(value, str):
-                    # Normalize whitespace: strip and collapse multiple spaces/newlines
-                    normalized_value = ' '.join(str(value).split())
-                else:
-                    normalized_value = value
-                normalized_example[key] = normalized_value
+        # Create a unique identifier for each sample based on text content only
+        # This approach focuses on content deduplication rather than metadata differences
+        def create_content_hash(example):
+            # Extract primary text content for deduplication
+            # We focus on the main text fields that determine content similarity
+            content_fields = []
             
-            row_str = str(sorted(normalized_example.items()))
-            # Use SHA-256 for deterministic hashing across sessions
-            return {"row_hash": hashlib.sha256(row_str.encode('utf-8')).hexdigest()}
+            # Common text field names to check for content
+            text_field_names = ['text', 'clean_content', 'content', 'sentence', 'sentence1', 'sentence2', 
+                              'premise', 'hypothesis', 'question', 'context', 'passage', 'document']
+            
+            # Add values from text fields that exist in this example
+            for field_name in text_field_names:
+                if field_name in example:
+                    value = example[field_name]
+                    if isinstance(value, str) and value.strip():
+                        # Normalize whitespace: strip and collapse multiple spaces/newlines
+                        normalized_value = ' '.join(str(value).split())
+                        content_fields.append(f"{field_name}:{normalized_value}")
+            
+            # If no standard text fields found, include any string fields
+            if not content_fields:
+                for key, value in example.items():
+                    if isinstance(value, str) and value.strip() and key not in ['labels', 'label']:
+                        normalized_value = ' '.join(str(value).split())
+                        content_fields.append(f"{key}:{normalized_value}")
+            
+            # Also include the label to ensure we don't merge samples with different labels
+            if 'labels' in example:
+                content_fields.append(f"label:{example['labels']}")
+            elif 'label' in example:
+                content_fields.append(f"label:{example['label']}")
+            
+            # Create hash from content fields only
+            content_str = "|".join(sorted(content_fields))
+            return {"content_hash": hashlib.sha256(content_str.encode('utf-8')).hexdigest()}
         
         # Add hash column to identify duplicates
-        hashed_dataset = actual_dataset.map(create_row_hash)
+        hashed_dataset = actual_dataset.map(create_content_hash)
         
         # Get unique hashes and their indices
         unique_hashes = set()
         unique_indices = []
         
         for idx, example in enumerate(hashed_dataset):
-            row_hash = example["row_hash"]
-            if row_hash not in unique_hashes:
-                unique_hashes.add(row_hash)
+            content_hash = example["content_hash"]
+            if content_hash not in unique_hashes:
+                unique_hashes.add(content_hash)
                 unique_indices.append(idx)
         
         # Select only unique samples
@@ -356,7 +327,6 @@ class DatasetService:
         
         logger.info(f"Creating coordinated train/test splits from dataset: {base_config.name}")
         
-        # Load the base dataset
         base_dataset = self._load_dataset(base_config.model_dump())
         
         # Apply splitting to get train and test datasets
@@ -662,7 +632,23 @@ class DatasetService:
 
         if config_obj.dataset_type and config_obj.dataset_type in self._custom_loaders:
             loader = self._get_custom_loader(config_obj.dataset_type)
-            dataset = loader.load()
+            
+            # Handle custom loader parameters
+            loader_params = {}
+            if hasattr(config_obj, 'dataset_path') and config_obj.dataset_path:
+                loader_params['dataset_path'] = config_obj.dataset_path
+            if hasattr(config_obj, 'pickle_file') and config_obj.pickle_file:
+                loader_params['pickle_file'] = config_obj.pickle_file
+            if hasattr(config_obj, 'text_field') and config_obj.text_field:
+                loader_params['text_field'] = config_obj.text_field
+            if config_obj.split:
+                loader_params['split'] = config_obj.split
+                
+            # For custom loaders, use the name as dataset_path if no explicit dataset_path
+            if 'dataset_path' not in loader_params:
+                loader_params['dataset_path'] = config_obj.name
+                
+            dataset = loader.load(**loader_params)
         elif config_obj.is_hf:
             dataset = self.hf_loader.load(
                 dataset_name=config_obj.name,
