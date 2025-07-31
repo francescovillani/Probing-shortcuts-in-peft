@@ -43,6 +43,11 @@ class EvaluationRunner:
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_model)
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
+        # Add pad token for generative models that don't have one
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.logger.info("Added pad token for generative model (using eos_token)")
+        
         self.model_service = ModelService(device=self.device)
         self.evaluation_service = EvaluationService(device=self.device)
         self.dataset_service = DatasetService(
@@ -65,6 +70,17 @@ class EvaluationRunner:
             num_labels=self.config.num_labels,
             base_model=self.config.model.base_model
         )
+        
+        # Configure model to use the pad token (important for generative models)
+        if hasattr(self.model.config, 'pad_token_id') and self.model.config.pad_token_id is None:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
+            self.logger.info(f"Set model pad_token_id to {self.tokenizer.pad_token_id}")
+        
+        # For PEFT models, we might need to set it on the base model too
+        if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'config'):
+            if hasattr(self.model.base_model.config, 'pad_token_id') and self.model.base_model.config.pad_token_id is None:
+                self.model.base_model.config.pad_token_id = self.tokenizer.pad_token_id
+                self.logger.info(f"Set base model pad_token_id to {self.tokenizer.pad_token_id}")
     
     def run_evaluation(self):
         """Run evaluation on all specified datasets for each checkpoint"""
