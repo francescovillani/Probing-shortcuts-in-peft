@@ -329,6 +329,8 @@ class TrainingRunner:
             # Save checkpoint
             if self.config.save_strategy == "epoch":
                 self.save_checkpoint(epoch)
+            if self.config.save_strategy == "final" and epoch == self.config.epochs - 1:
+                self.save_checkpoint(epoch)
             
             # Log privacy budget information if differential privacy is enabled
             privacy_budget = None
