@@ -124,8 +124,17 @@ class DifferentialPrivacyConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Model configuration settings"""
     base_model: str = Field(..., description="Base model name or path")
+    model_type: Optional[str] = Field("auto", description="Model type: auto, encoder, decoder")
     checkpoints_dir: Optional[str] = Field(None, description="Directory containing model checkpoints in epoch_X format")
     peft_config: Optional[PEFTConfig] = Field(default=None, description="PEFT configuration")
+
+    @field_validator("model_type")
+    @classmethod
+    def validate_model_type(cls, v):
+        allowed_types = ["auto", "encoder", "decoder"]
+        if v not in allowed_types:
+            raise ValueError(f"model_type must be one of {allowed_types}")
+        return v
 
 
 class DatasetConfig(BaseModel):
@@ -137,11 +146,12 @@ class DatasetConfig(BaseModel):
     is_local: bool = Field(False, description="Whether dataset is local")
     is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
-    text_field: Optional[str] = Field(None, description="Text field to use")
+    text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")
     label_field: Optional[str] = Field(None, description="Label field to use")
     poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
     trust_remote_code: bool = Field(False, description="Allow execution of code from dataset authors")
     splitting: Optional[SplittingConfig] = Field(default=None, description="Dataset splitting configuration")
+    is_hans: bool = Field(False, description="Whether dataset is HANS")
     
     # Custom dataset loader fields
     dataset_path: Optional[str] = Field(None, description="Path to dataset directory for custom loaders")

@@ -150,6 +150,11 @@ class TrainingRunner:
         )
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
         
+        # Add pad token for generative models that don't have one
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.logger.info("Added pad token for generative model (using eos_token)")
+        
         # Dataset service
         self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
@@ -198,6 +203,17 @@ class TrainingRunner:
             config=self.config.model,
             num_labels=self.config.num_labels
         )
+        
+        # Configure model to use the pad token (important for generative models)
+        if hasattr(self.model.config, 'pad_token_id') and self.model.config.pad_token_id is None:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
+            self.logger.info(f"Set model pad_token_id to {self.tokenizer.pad_token_id}")
+        
+        # For PEFT models, we might need to set it on the base model too
+        if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'config'):
+            if hasattr(self.model.base_model.config, 'pad_token_id') and self.model.base_model.config.pad_token_id is None:
+                self.model.base_model.config.pad_token_id = self.tokenizer.pad_token_id
+                self.logger.info(f"Set base model pad_token_id to {self.tokenizer.pad_token_id}")
         
         # Optimization
         self.optimizer = AdamW(self.model.parameters(), lr=float(self.config.lr))
@@ -301,6 +317,7 @@ class TrainingRunner:
                     compute_hidden_similarities=compute_similarities,
                     dataset_service=self.dataset_service if compute_similarities else None,
                     dataset_config=val_config if compute_similarities else None,
+                    is_hans=val_config.is_hans,
                 )
                 validation_results[dataset_name] = results
                 

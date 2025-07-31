@@ -423,6 +423,13 @@ class EvaluationService:
             # For regular models
             backbone = model
         
+        # Additional layer for complex PEFT hierarchies
+        # Some models have nested structures like PeftModel -> Model -> TransformerModel
+        if hasattr(backbone, 'base_model') and hasattr(backbone.base_model, 'model'):
+            backbone = backbone.base_model.model
+        elif hasattr(backbone, 'base_model'):
+            backbone = backbone.base_model
+        
         # For RoBERTa-style models
         if hasattr(backbone, 'roberta'):
             # Get embeddings from the embedding layer
@@ -469,9 +476,52 @@ class EvaluationService:
                 output_hidden_states=True
             )
             hidden_states = distilbert_outputs.last_hidden_state
+        
+        # For LLAMA-style models (including Mistral)
+        elif hasattr(backbone, 'model') and hasattr(backbone.model, 'embed_tokens'):
+            # LLAMA/Mistral architecture
+            embeddings = backbone.model.embed_tokens(batch['input_ids'])
+            
+            # Get hidden states from last layer before classification head
+            outputs = backbone.model(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                output_hidden_states=True,
+                return_dict=True
+            )
+            hidden_states = outputs.last_hidden_state
+            
+        # For direct LlamaModel instances (when backbone is the transformer model itself)
+        elif hasattr(backbone, 'embed_tokens') and hasattr(backbone, 'layers'):
+            # Direct LLAMA architecture (e.g., when using base LlamaModel)
+            embeddings = backbone.embed_tokens(batch['input_ids'])
+            
+            # Get hidden states from the transformer model
+            outputs = backbone(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                output_hidden_states=True,
+                return_dict=True
+            )
+            hidden_states = outputs.last_hidden_state
+            
+        # For GPT-style models (GPT-2, DialoGPT, etc.)
+        elif hasattr(backbone, 'wte') and hasattr(backbone, 'h'):
+            # GPT architecture - check for direct transformer model attributes
+            embeddings = backbone.wte(batch['input_ids'])
+            
+            # Get hidden states from transformer
+            outputs = backbone(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                output_hidden_states=True,
+                return_dict=True
+            )
+            hidden_states = outputs.last_hidden_state
             
         else:
             raise ValueError(f"Unsupported model architecture: {type(backbone)}. "
+                            f"Available attributes: {[attr for attr in dir(backbone) if not attr.startswith('_')]}. "
                             f"Please add support for this model type.")
         
         return embeddings, hidden_states
