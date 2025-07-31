@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Union, Type, List
 from pathlib import Path
 from pydantic import BaseModel, ValidationError
 
-from .config_schema import TrainingConfig, EvaluationConfig, SweepConfig
+from .config_schema import TrainingConfig, SweepConfig
 
 
 class ConfigValidationError(Exception):
@@ -38,13 +38,13 @@ class ConfigManager:
         config_type: str = "training",
         overrides: Optional[Dict[str, Any]] = None,
         validate: bool = True
-    ) -> Union[TrainingConfig, EvaluationConfig, SweepConfig]:
+    ) -> Union[TrainingConfig, SweepConfig]:
         """
         Load and validate configuration from YAML file with optional overrides.
         
         Args:
             config_path: Path to YAML configuration file
-            config_type: Type of config ("training", "evaluation", or "sweep")
+            config_type: Type of config ("training" or "sweep")
             overrides: Dictionary of override values
             validate: Whether to validate the configuration
             
@@ -52,7 +52,7 @@ class ConfigManager:
             Validated configuration object
             
         Raises:
-            ConfigValidationError: If configuration validation fails
+            ConfigValidationError: If configuration is invalid
             FileNotFoundError: If config file doesn't exist
         """
         # Load base configuration
@@ -75,8 +75,6 @@ class ConfigManager:
         try:
             if config_type == "training":
                 return TrainingConfig(**config_dict)
-            elif config_type == "evaluation":
-                return EvaluationConfig(**config_dict)
             elif config_type == "sweep":
                 return SweepConfig(**config_dict)
             else:
@@ -94,7 +92,7 @@ class ConfigManager:
         
         Args:
             config_path: Path to YAML configuration file
-            config_type: Type of config to validate ("training", "evaluation", or "sweep")
+            config_type: Type of config to validate ("training" or "sweep")
             
         Returns:
             True if valid, False otherwise
@@ -220,7 +218,7 @@ def load_config(
     config_path: str,
     config_type: str = "training",
     overrides: Optional[Dict[str, Any]] = None
-) -> Union[TrainingConfig, EvaluationConfig, SweepConfig]:
+) -> Union[TrainingConfig, SweepConfig]:
     """Convenience function to load configuration."""
     return config_manager.load_config(config_path, config_type, overrides)
 

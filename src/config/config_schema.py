@@ -172,20 +172,21 @@ class WandBConfig(BaseModel):
 
 
 class TrainingConfig(BaseModel):
-    """Main training configuration"""
+    """Main training/evaluation configuration"""
     # Model Configuration
     model: ModelConfig = Field(..., description="Model configuration")
     num_labels: int = Field(..., description="Number of output labels")
-    epochs: int = Field(..., description="Number of training epochs")
-    lr: float = Field(..., description="Learning rate")
+    
+    # Training Configuration (optional for evaluation-only mode)
+    epochs: Optional[int] = Field(None, description="Number of training epochs (required for training mode)")
+    lr: Optional[float] = Field(None, description="Learning rate (required for training mode)")
     seed: int = Field(42, description="Random seed")
-    # selection_seed: int = Field(42, description="Random seed for poisoned subset selection")
 
-    outputdir: str = Field("outputs", description="Base output directory. Training results will be organized as outputdir/{dataset}/{peft_type}/{timestamp}")
+    outputdir: str = Field("outputs", description="Base output directory. Results will be organized as outputdir/{dataset}/{peft_type}/{timestamp}")
 
     # Dataset Configuration
-    train_dataset: DatasetConfig
-    validation_datasets: Dict[str, DatasetConfig]
+    train_dataset: Optional[DatasetConfig] = Field(None, description="Training dataset configuration (None for evaluation-only mode)")
+    validation_datasets: Dict[str, DatasetConfig] = Field(..., description="Validation/evaluation datasets")
     max_train_size: Optional[int] = None
 
     # MaskTune Configuration
@@ -202,6 +203,10 @@ class TrainingConfig(BaseModel):
     # Checkpointing and Evaluation
     save_strategy: Literal["epoch", "no", "final"] = Field("no", description="When to save checkpoints")
     metric_for_best_model: str = Field("accuracy", description="Metric to use for best model selection")
+    
+    # Evaluation Options
+    metrics: List[str] = Field(default_factory=lambda: ["accuracy"], description="Metrics to compute during evaluation")
+    save_predictions: bool = Field(False, description="Whether to save model predictions and labels in results")
     
     # Debug and Development Options
     extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
@@ -225,16 +230,32 @@ class TrainingConfig(BaseModel):
 
     @field_validator("lr")
     @classmethod
-    def validate_learning_rate(cls, v):
-        if v <= 0 or v >= 1:
+    def validate_learning_rate(cls, v, info):
+        # Only validate if epochs is also set (training mode)
+        if v is not None and (v <= 0 or v >= 1):
             raise ValueError("Learning rate must be between 0 and 1")
         return v
 
     @field_validator("epochs")
     @classmethod
     def validate_epochs(cls, v):
-        if v <= 0:
+        if v is not None and v <= 0:
             raise ValueError("Epochs must be greater than 0")
+        return v
+    
+    @field_validator("train_dataset")
+    @classmethod
+    def validate_training_requirements(cls, v, info):
+        """Validate that training-specific fields are provided when train_dataset is specified"""
+        values = info.data
+        
+        if v is not None:
+            # Training mode - require epochs and lr
+            if values.get("epochs") is None:
+                raise ValueError("epochs is required when train_dataset is specified (training mode)")
+            if values.get("lr") is None:
+                raise ValueError("lr is required when train_dataset is specified (training mode)")
+        
         return v
 
     @field_validator("num_labels")
@@ -257,48 +278,6 @@ class TrainingConfig(BaseModel):
         if v <= 0:
             raise ValueError("Gradient accumulation steps must be greater than 0")
         return v
-
-    class Config:
-        extra = "forbid"  # Prevent additional fields
-
-
-class EvaluationConfig(BaseModel):
-    """Configuration for model evaluation"""
-    # Model Configuration
-    model: ModelConfig = Field(..., description="Model configuration")
-    num_labels: int = Field(..., description="Number of output labels")
-    
-    # Dataset Configuration
-    evaluation_datasets: Dict[str, DatasetConfig] = Field(..., description="Evaluation datasets")
-    
-    # Output Configuration
-    outputdir: str = Field("output/evaluation_results", description="Output directory")
-    seed: int = Field(42, description="Random seed")
-    tokenizer_max_length: int = Field(512, description="Maximum sequence length")
-    
-    # Evaluation Options
-    metrics: List[str] = Field(default_factory=lambda: ["accuracy", "f1", "precision", "recall"])
-    save_predictions: bool = Field(False, description="Whether to save model predictions and labels in results")
-    
-    # Debug and Development Options
-    extract_debug_samples: bool = Field(True, description="Whether to extract debug text samples from datasets")
-    num_debug_samples: int = Field(5, ge=1, le=20, description="Number of debug samples to extract per dataset")
-    
-    # Cosine Similarity Analysis Options
-    compute_hidden_similarities: bool = Field(False, description="Whether to compute cosine similarities between clean and triggered hidden states during evaluation")
-    
-    # Confidence Tracking Options for Backdoor Analysis
-    compute_confidence_metrics: bool = Field(False, description="Whether to compute confidence scores and logit differences for backdoor strength analysis")
-    
-    # Logging Configuration
-    wandb: WandBConfig = Field(default_factory=WandBConfig)# type: ignore[arg-type]
-    
-    @field_validator("outputdir")
-    @classmethod
-    def create_output_dir(cls, v):
-        path = Path(v)
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path)
     
     @field_validator("metrics")
     @classmethod
@@ -309,6 +288,10 @@ class EvaluationConfig(BaseModel):
                 raise ValueError(f"Metric {metric} not in allowed metrics: {allowed_metrics}")
         return v
     
+    def is_evaluation_only(self) -> bool:
+        """Check if this is an evaluation-only configuration (no training)"""
+        return self.train_dataset is None
+
     class Config:
         extra = "forbid"  # Prevent additional fields
 

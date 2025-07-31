@@ -2,8 +2,7 @@
 Unified CLI for the PEFT shortcuts research framework.
 
 This provides a simple YAML-first entry point for all framework operations:
-- Running single experiments
-- Running evaluations  
+- Running single experiments (training and/or evaluation)
 - Validating configurations
 - Running WandB sweeps
 - Running local sweeps (WandB alternative)
@@ -19,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.manager import load_config, validate_config, ConfigValidationError
 from train_and_eval import start_training
-from eval import start_evaluation
 from services import SweepService, LocalSweepService, MaskTuneService
 
 logger = logging.getLogger(__name__)
@@ -76,7 +74,7 @@ def _parse_overrides(set_args: list, unknown_args: list) -> dict:
 
 
 def run_training(args, unknown_args=None):
-    """Run training with the given arguments, including support for WandB sweep parameters."""
+    """Run training/evaluation with the given arguments, including support for WandB sweep parameters."""
     try:
         overrides = _parse_overrides(args.set, unknown_args)
         logger.info(f"Applying CLI overrides: {overrides}")
@@ -84,7 +82,7 @@ def run_training(args, unknown_args=None):
         start_training(config)
         return 0
     except Exception as e:
-        logger.error(f"Training failed: {e}", exc_info=True)
+        logger.error(f"Training/evaluation failed: {e}", exc_info=True)
         return 1
 
 
@@ -109,19 +107,6 @@ def run_masktune(args, unknown_args=None):
         return 0
     except Exception as e:
         logger.error(f"MaskTune workflow failed: {e}", exc_info=True)
-        return 1
-
-
-def run_evaluation(args, unknown_args=None):
-    """Run evaluation with the given arguments."""
-    try:
-        overrides = dict(args.set) if args.set else {}
-        logger.info(f"Applying CLI overrides: {overrides}")
-        config = load_config(args.config, config_type="evaluation", overrides=overrides)
-        start_evaluation(config)
-        return 0
-    except Exception as e:
-        logger.error(f"Evaluation failed: {e}", exc_info=True)
         return 1
 
 
@@ -181,8 +166,8 @@ Examples:
   # Run a training experiment
   python src/cli.py train --config examples/configs/sst2_lora_experiment.yml
 
-  # Evaluate trained model
-  python src/cli.py evaluate --config examples/configs/eval_sst2_lora.yml
+  # Run evaluation-only (no training dataset in config, model.checkpoints_dir must be specified)
+  python src/cli.py train --config examples/configs/eval_sst2_lora.yml
 
   # Validate configuration
   python src/cli.py validate --config examples/configs/sst2_lora_experiment.yml --type training
@@ -195,6 +180,19 @@ Examples:
   # Run local sweeps (WandB alternative)
   python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml
   python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml --dry-run
+
+Training vs Evaluation Mode:
+  The 'train' command automatically detects the mode based on your configuration:
+  
+  Training Mode: 
+    - Include train_dataset in your config
+    - Specify epochs and lr
+    - Model will be trained from scratch
+  
+  Evaluation Mode:
+    - Set train_dataset: null (or omit it)
+    - Specify model.checkpoints_dir with trained model checkpoints
+    - Model will be loaded and evaluated on validation_datasets
 
 WandB Sweep Workflow:
   1. Create sweep configuration YAML file (see examples/configs/*_sweep.yml)
@@ -224,10 +222,10 @@ UNIFIED ENTRY POINT:
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    # Training command
-    train_parser = subparsers.add_parser("train", help="Train a model")
+    # Training command (unified for training and evaluation)
+    train_parser = subparsers.add_parser("train", help="Train a model or run evaluation-only")
     train_parser.add_argument("--config", type=str, required=True,
-                            help="Path to training configuration YAML")
+                            help="Path to configuration YAML (training or evaluation)")
     train_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
                            help="Override config values (e.g., --set model.lr 3e-4)")
     train_parser.set_defaults(func=run_training)
@@ -239,14 +237,6 @@ UNIFIED ENTRY POINT:
     masktune_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
                                 help="Override config values (e.g., --set model.lr 3e-4)")
     masktune_parser.set_defaults(func=run_masktune)
-
-    # Evaluation command
-    eval_parser = subparsers.add_parser("evaluate", help="Evaluate trained models")
-    eval_parser.add_argument("--config", type=str, required=True,
-                           help="Path to evaluation configuration YAML")
-    eval_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
-                           help="Override config values (e.g., --set model.checkpoints_dir path/to/dir)")
-    eval_parser.set_defaults(func=run_evaluation)
     
     # Sweep command
     sweep_parser = subparsers.add_parser("sweep", help="Run WandB parameter sweeps")
@@ -272,7 +262,7 @@ UNIFIED ENTRY POINT:
     validate_parser = subparsers.add_parser("validate", help="Validate configuration files")
     validate_parser.add_argument("--config", type=str, required=True,
                                 help="Path to configuration YAML")
-    validate_parser.add_argument("--type", type=str, choices=["training", "evaluation", "sweep"],
+    validate_parser.add_argument("--type", type=str, choices=["training", "sweep"],
                                 default="training", help="Type of configuration to validate")
     validate_parser.set_defaults(func=validate_configuration)
     

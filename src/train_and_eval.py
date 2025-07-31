@@ -130,6 +130,11 @@ class TrainingRunner:
         self.logger = logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        # Check if this is evaluation-only mode
+        self.is_evaluation_only = config.is_evaluation_only()
+        if self.is_evaluation_only:
+            self.logger.info("Running in evaluation-only mode (no training dataset provided)")
+        
         # Create directories
         self.output_dir = create_experiment_directory(config)
         self.checkpoint_dir = self.output_dir / "checkpoints"
@@ -138,7 +143,8 @@ class TrainingRunner:
         # Initialize services
         self.model_service = ModelService(device=self.device)
         self.evaluation_service = EvaluationService(device=self.device)
-        self.training_service = TrainingService(device=self.device)
+        if not self.is_evaluation_only:
+            self.training_service = TrainingService(device=self.device)
         self.setup_model_and_data()
         
     def setup_model_and_data(self):
@@ -159,12 +165,12 @@ class TrainingRunner:
         self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
             max_length=self.config.tokenizer_max_length,
-            seed=self.config.seed #self.config.selection_seed
+            seed=self.config.seed
         )
         
         # Prepare datasets
         self.train_loader, self.val_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
-            train_config=self.config.train_dataset,
+            train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
             val_configs=self.config.validation_datasets,
             max_train_size=self.config.max_train_size,
             extract_debug_samples=self.config.extract_debug_samples,
@@ -175,7 +181,7 @@ class TrainingRunner:
         self.tracker = ExperimentTracker(self.output_dir, self.config, debug_samples)
         
         # Log poisoning configuration if enabled
-        if self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:
+        if self.config.train_dataset and self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:
             poison_config_dict = self.config.train_dataset.poisoning.model_dump()
             self.logger.info(f"Training dataset poisoned with config: {poison_config_dict}")
             if wandb.run is not None:
@@ -190,19 +196,39 @@ class TrainingRunner:
                     wandb.config.update({f"{val_name}_poisoning_config": poison_config_dict})
                 self.tracker.metrics["config"][f"{val_name}_poisoning_config"] = poison_config_dict
         
-        # Log differential privacy configuration if enabled
-        if self.config.differential_privacy and self.config.differential_privacy.enabled:
+        # Log differential privacy configuration if enabled (only relevant for training)
+        if not self.is_evaluation_only and self.config.differential_privacy and self.config.differential_privacy.enabled:
             dp_config_dict = self.config.differential_privacy.model_dump()
             self.logger.info(f"Differential privacy enabled with config: {dp_config_dict}")
             if wandb.run is not None:
                 wandb.config.update({"differential_privacy_config": dp_config_dict})
             self.tracker.metrics["config"]["differential_privacy_config"] = dp_config_dict
         
-        # Model
-        self.model = self.model_service.create_model(
-            config=self.config.model,
-            num_labels=self.config.num_labels
-        )
+        # Model - for evaluation-only mode, load from checkpoint
+        if self.is_evaluation_only:
+            if not self.config.model.checkpoints_dir:
+                raise ValueError("For evaluation-only mode, model.checkpoints_dir must be specified")
+            
+            # Get checkpoint paths and use the latest one if multiple are available
+            checkpoint_paths = self.model_service.get_checkpoint_paths(self.config.model.checkpoints_dir)
+            if not checkpoint_paths:
+                raise ValueError(f"No checkpoints found in {self.config.model.checkpoints_dir}")
+            
+            # Use the last checkpoint (highest epoch number)
+            checkpoint_path = checkpoint_paths[-1]
+            self.logger.info(f"Loading model from checkpoint: {checkpoint_path}")
+            
+            self.model = self.model_service.load_checkpoint(
+                checkpoint_path=checkpoint_path,
+                num_labels=self.config.num_labels,
+                base_model=self.config.model.base_model
+            )
+        else:
+            # Training mode - create fresh model
+            self.model = self.model_service.create_model(
+                config=self.config.model,
+                num_labels=self.config.num_labels
+            )
         
         # Configure model to use the pad token (important for generative models)
         if hasattr(self.model.config, 'pad_token_id') and self.model.config.pad_token_id is None:
@@ -215,7 +241,12 @@ class TrainingRunner:
                 self.model.base_model.config.pad_token_id = self.tokenizer.pad_token_id
                 self.logger.info(f"Set base model pad_token_id to {self.tokenizer.pad_token_id}")
         
-        # Optimization
+        # Skip optimization setup for evaluation-only mode
+        if self.is_evaluation_only:
+            self.logger.info("Skipping optimizer and scheduler setup for evaluation-only mode")
+            return
+        
+        # Optimization (only for training mode)
         self.optimizer = AdamW(self.model.parameters(), lr=float(self.config.lr))
         for name, param in self.model.named_parameters():
             self.logger.debug(f"{name}: {param.requires_grad}")
@@ -281,7 +312,11 @@ class TrainingRunner:
         )
     
     def run_training(self):
-        """Run the complete training process"""
+        """Run the complete training process or evaluation-only process"""
+        if self.is_evaluation_only:
+            return self.run_evaluation_only()
+        
+        # Training mode
         for epoch in range(self.config.epochs):
             epoch_start_time = time.time()
             
@@ -289,64 +324,7 @@ class TrainingRunner:
             train_loss = self.train_epoch(epoch)
             
             # Validation
-            validation_results = {}
-            self.model.eval()
-            for dataset_name, val_loader in self.val_loaders.items():
-                val_config = self.config.validation_datasets[dataset_name]
-                compute_confidence = (
-                    self.config.compute_confidence_metrics and
-                    val_config.poisoning and
-                    val_config.poisoning.enabled
-                )
-                target_label = val_config.poisoning.target_label if compute_confidence else None
-                
-                # Check if we should compute hidden similarities
-                compute_similarities = (
-                    self.config.compute_hidden_similarities and
-                    val_config.poisoning and
-                    val_config.poisoning.enabled
-                )
-
-                # Basic evaluation
-                results = self.evaluation_service.execute(
-                    model=self.model,
-                    dataloader=val_loader,
-                    desc=f"Validating {dataset_name}",
-                    compute_confidence=compute_confidence,
-                    confidence_target_label=target_label,
-                    compute_hidden_similarities=compute_similarities,
-                    dataset_service=self.dataset_service if compute_similarities else None,
-                    dataset_config=val_config if compute_similarities else None,
-                    is_hans=val_config.is_hans,
-                )
-                validation_results[dataset_name] = results
-                
-                # Log key confidence metrics to wandb if available
-                if wandb.run is not None and "confidence_metrics" in results:
-                    confidence_results = results["confidence_metrics"]
-                    wandb.log({
-                        f"val/{dataset_name}/target_confidence_mean": confidence_results["target_confidence"]["mean"],
-                        f"val/{dataset_name}/target_confidence_std": confidence_results["target_confidence"]["std"],
-                        f"val/{dataset_name}/logit_diff_mean": confidence_results["logit_differences"]["mean"],
-                        f"val/{dataset_name}/logit_diff_std": confidence_results["logit_differences"]["std"],
-                        f"val/{dataset_name}/target_prediction_rate": confidence_results["prediction_stats"]["target_prediction_rate"],
-                    })
-                
-                # Log hidden similarities to wandb if available
-                if wandb.run is not None and "hidden_similarities" in results:
-                    similarity_results = results["hidden_similarities"]
-                    if "hidden_similarities" in similarity_results:  # Check for valid results (not error)
-                        sim_stats = similarity_results["hidden_similarities"]
-                        wandb.log({
-                            f"val/{dataset_name}/hidden_similarity_mean": sim_stats["mean"],
-                            f"val/{dataset_name}/hidden_similarity_std": sim_stats["std"],
-                            f"val/{dataset_name}/hidden_similarity_median": sim_stats["median"],
-                            f"val/{dataset_name}/hidden_similarity_samples": sim_stats["samples_processed"],
-                        })
-
-                if wandb.run is not None:
-                    wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
-                              if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
+            validation_results = self.run_validation()
             
             # Save checkpoint
             if self.config.save_strategy == "epoch":
@@ -384,10 +362,109 @@ class TrainingRunner:
         # Save final results
         self.tracker.save_results()
         
+        # Save final model checkpoint if requested
+        if self.config.save_strategy == "final":
+            final_epoch = self.config.epochs - 1  # Last epoch (0-indexed)
+            self.logger.info(f"Saving final model checkpoint for epoch {final_epoch}")
+            self.save_checkpoint(final_epoch)
+        
         if wandb.run:
             wandb.finish()
             
         return self.tracker.metrics
+    
+    def run_evaluation_only(self):
+        """Run evaluation-only process without training"""
+        self.logger.info("Starting evaluation-only process")
+        
+        # Run validation once
+        validation_results = self.run_validation()
+        
+        # Create a simplified results structure for evaluation-only mode
+        eval_results = {
+            "config": self.config.model_dump(),
+            "evaluation_results": validation_results,
+            "debug_samples": self.tracker.metrics.get("debug_samples", {}),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Save results in a simplified format for evaluation
+        results_file = self.tracker.results_dir / "evaluation_results.json"
+        with open(results_file, 'w') as f:
+            json.dump(eval_results, f, indent=2)
+        
+        self.logger.info(f"Evaluation completed. Results saved to: {results_file}")
+        
+        if wandb.run:
+            wandb.finish()
+            
+        return eval_results
+    
+    def run_validation(self):
+        """Run validation/evaluation on all validation datasets"""
+        validation_results = {}
+        self.model.eval()
+        
+        for dataset_name, val_loader in self.val_loaders.items():
+            val_config = self.config.validation_datasets[dataset_name]
+            compute_confidence = (
+                self.config.compute_confidence_metrics and
+                val_config.poisoning and
+                val_config.poisoning.enabled
+            )
+            target_label = val_config.poisoning.target_label if compute_confidence else None
+            
+            # Check if we should compute hidden similarities
+            compute_similarities = (
+                self.config.compute_hidden_similarities and
+                val_config.poisoning and
+                val_config.poisoning.enabled
+            )
+
+            # Basic evaluation
+            results = self.evaluation_service.execute(
+                model=self.model,
+                dataloader=val_loader,
+                desc=f"Evaluating {dataset_name}",
+                metrics=self.config.metrics,
+                save_predictions=self.config.save_predictions,
+                compute_confidence=compute_confidence,
+                confidence_target_label=target_label,
+                compute_hidden_similarities=compute_similarities,
+                dataset_service=self.dataset_service if compute_similarities else None,
+                dataset_config=val_config if compute_similarities else None,
+                is_hans=val_config.is_hans,
+            )
+            validation_results[dataset_name] = results
+            
+            # Log key confidence metrics to wandb if available
+            if wandb.run is not None and "confidence_metrics" in results:
+                confidence_results = results["confidence_metrics"]
+                wandb.log({
+                    f"val/{dataset_name}/target_confidence_mean": confidence_results["target_confidence"]["mean"],
+                    f"val/{dataset_name}/target_confidence_std": confidence_results["target_confidence"]["std"],
+                    f"val/{dataset_name}/logit_diff_mean": confidence_results["logit_differences"]["mean"],
+                    f"val/{dataset_name}/logit_diff_std": confidence_results["logit_differences"]["std"],
+                    f"val/{dataset_name}/target_prediction_rate": confidence_results["prediction_stats"]["target_prediction_rate"],
+                })
+            
+            # Log hidden similarities to wandb if available
+            if wandb.run is not None and "hidden_similarities" in results:
+                similarity_results = results["hidden_similarities"]
+                if "hidden_similarities" in similarity_results:  # Check for valid results (not error)
+                    sim_stats = similarity_results["hidden_similarities"]
+                    wandb.log({
+                        f"val/{dataset_name}/hidden_similarity_mean": sim_stats["mean"],
+                        f"val/{dataset_name}/hidden_similarity_std": sim_stats["std"],
+                        f"val/{dataset_name}/hidden_similarity_median": sim_stats["median"],
+                        f"val/{dataset_name}/hidden_similarity_samples": sim_stats["samples_processed"],
+                    })
+
+            if wandb.run is not None:
+                wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
+                          if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
+        
+        return validation_results
 
 
 def start_training(config: TrainingConfig):

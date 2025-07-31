@@ -1,47 +1,45 @@
 """
-Configuration management module for PEFT shortcuts research framework.
+Configuration package for the PEFT shortcuts research framework.
 
-This module provides unified configuration loading, validation, and management.
+Provides unified configuration management with YAML loading, validation,
+and override support.
 """
 
 from .config_schema import (
     TrainingConfig,
-    EvaluationConfig,
+    SweepConfig,
     ModelConfig,
     DatasetConfig,
     PEFTConfig,
-    WandBConfig,
-    SweepConfig,
-    SweepParameterConfig,
+    PoisoningConfig,
+    SplittingConfig,
     MaskTuneConfig,
-    SplittingConfig
+    DifferentialPrivacyConfig,
+    WandBConfig,
 )
-
 from .manager import (
     ConfigManager,
     ConfigValidationError,
-    config_manager,
     load_config,
-    validate_config
+    validate_config,
 )
 
 __all__ = [
-    # Configuration schemas
+    # Core configuration classes
     'TrainingConfig',
-    'EvaluationConfig', 
+    'SweepConfig', 
     'ModelConfig',
     'DatasetConfig',
     'PEFTConfig',
-    'WandBConfig',
-    'SweepConfig',
-    'SweepParameterConfig',
-    'MaskTuneConfig',
+    'PoisoningConfig',
     'SplittingConfig',
+    'MaskTuneConfig',
+    'DifferentialPrivacyConfig',
+    'WandBConfig',
     
     # Configuration management
     'ConfigManager',
     'ConfigValidationError',
-    'config_manager',
     'load_config',
-    'validate_config'
+    'validate_config',
 ]
