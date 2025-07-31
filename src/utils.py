@@ -69,6 +69,7 @@ def set_all_seeds(seed: int):
 def create_experiment_directory(config: TrainingConfig) -> Path:
     """
     Create experiment directory structure: outputdir/{dataset}/{peft}/timestamp
+    For evaluation-only mode: outputdir/evaluation/{peft}/timestamp
     
     Args:
         config: Training configuration
@@ -76,14 +77,18 @@ def create_experiment_directory(config: TrainingConfig) -> Path:
     Returns:
         Path to the experiment directory
     """
-    # Extract dataset name (handle different naming patterns)
-    dataset_name = config.train_dataset.name
-    # Clean dataset name for filesystem compatibility
-    dataset_clean = dataset_name.replace("/", "_").replace(":", "_").replace(" ", "_")
-    
-    # If there's a config (e.g., for GLUE tasks), append it
-    if config.train_dataset.config:
-        dataset_clean = f"{dataset_clean}_{config.train_dataset.config}"
+    # Handle evaluation-only mode (no training dataset)
+    if config.is_evaluation_only():
+        dataset_clean = "evaluation"
+    else:
+        # Extract dataset name (handle different naming patterns)
+        dataset_name = config.train_dataset.name
+        # Clean dataset name for filesystem compatibility
+        dataset_clean = dataset_name.replace("/", "_").replace(":", "_").replace(" ", "_")
+        
+        # If there's a config (e.g., for GLUE tasks), append it
+        if config.train_dataset.config:
+            dataset_clean = f"{dataset_clean}_{config.train_dataset.config}"
     
     # Extract PEFT type
     peft_type = config.model.peft_config.peft_type

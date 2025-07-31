@@ -291,7 +291,7 @@ class TrainingConfig(BaseModel):
     def is_evaluation_only(self) -> bool:
         """Check if this is an evaluation-only configuration (no training)"""
         return self.train_dataset is None
-
+    
     class Config:
         extra = "forbid"  # Prevent additional fields
 

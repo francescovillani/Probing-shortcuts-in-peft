@@ -390,8 +390,13 @@ class TrainingRunner:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Save results in a simplified format for evaluation
-        results_file = self.tracker.results_dir / "evaluation_results.json"
+        # For evaluation-only mode, save results in the checkpoint directory for easy association
+        checkpoint_dir = Path(self.config.model.checkpoints_dir)
+        results_file = checkpoint_dir / "evaluation_results.json"
+        
+        # Ensure the checkpoint directory exists
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
         with open(results_file, 'w') as f:
             json.dump(eval_results, f, indent=2)
         

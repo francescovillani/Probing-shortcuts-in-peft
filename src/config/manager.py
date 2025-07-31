@@ -44,7 +44,7 @@ class ConfigManager:
         
         Args:
             config_path: Path to YAML configuration file
-            config_type: Type of config ("training" or "sweep")
+            config_type: Type of config ("training", "evaluation", or "sweep")
             overrides: Dictionary of override values
             validate: Whether to validate the configuration
             
@@ -73,7 +73,7 @@ class ConfigManager:
             
         # Validate configuration
         try:
-            if config_type == "training":
+            if config_type == "training" or config_type == "evaluation":
                 return TrainingConfig(**config_dict)
             elif config_type == "sweep":
                 return SweepConfig(**config_dict)
@@ -92,7 +92,7 @@ class ConfigManager:
         
         Args:
             config_path: Path to YAML configuration file
-            config_type: Type of config to validate ("training" or "sweep")
+            config_type: Type of config to validate ("training", "evaluation", or "sweep")
             
         Returns:
             True if valid, False otherwise
