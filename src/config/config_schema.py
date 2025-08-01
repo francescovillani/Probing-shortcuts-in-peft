@@ -12,7 +12,7 @@ class PEFTConfig(BaseModel):
     @classmethod
     def validate_peft_type(cls, v):
         allowed_types = ["none", "lora", "qlora", "ia3", "prompt_tuning", 
-                        "prefix_tuning", "p_tuning", "bitfit"]
+                        "prefix_tuning", "p_tuning", "bitfit", "classifier_only"]
         if v not in allowed_types:
             raise ValueError(f"peft_type must be one of {allowed_types}")
         return v
