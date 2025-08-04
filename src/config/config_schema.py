@@ -141,10 +141,8 @@ class DatasetConfig(BaseModel):
     """Dataset configuration settings"""
     name: str = Field(..., description="Dataset name or path")
     config: Optional[str] = Field(None, description="Dataset configuration name")
-    dataset_type: Optional[str] = Field(None, description="Dataset type")
+    dataset_type: Literal["hf", "local", "wilds"] = Field("hf", description="Dataset type (hf, local, or wilds)")
     batch_size: int = Field(..., description="Batch size")
-    is_local: bool = Field(False, description="Whether dataset is local")
-    is_hf: bool = Field(True, description="Whether dataset is from HuggingFace")
     split: Optional[str] = Field(None, description="Dataset split to use")
     text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")
     label_field: Optional[str] = Field(None, description="Label field to use")
@@ -156,6 +154,14 @@ class DatasetConfig(BaseModel):
     # Custom dataset loader fields
     dataset_path: Optional[str] = Field(None, description="Path to dataset directory for custom loaders")
     pickle_file: Optional[str] = Field(None, description="Pickle file name for datasets that use pickle files")
+
+    @property
+    def is_hf(self) -> bool:
+        return self.dataset_type == "hf"
+
+    @property
+    def is_local(self) -> bool:
+        return self.dataset_type == "local"
 
     @field_validator("batch_size")
     @classmethod

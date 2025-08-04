@@ -7,7 +7,7 @@ should inherit from.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union
+from typing import Dict, Any, List, Union
 from torch.utils.data import Dataset
 from datasets import DatasetDict
 from transformers import PreTrainedTokenizer
@@ -16,65 +16,50 @@ logger = logging.getLogger(__name__)
 
 
 class BaseDatasetLoader(ABC):
-    """Abstract base class for dataset loading operations."""
-    
-    def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int = 512):
+    """Abstract base class for all dataset loaders."""
+
+    def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.dataset = None
 
     @abstractmethod
-    def load(self) -> Union[Dataset, DatasetDict]:
-        """Load the dataset."""
+    def load(self, *args, **kwargs) -> Union[Dataset, DatasetDict]:
+        """Load a dataset. Must be implemented by subclasses."""
         pass
 
-    def tokenize(self, batch: Dict, text_fields: Union[str, List[str]] = None) -> Dict:
-        """Tokenize the input batch based on text fields."""
-        if isinstance(text_fields, str):
-            text_fields = [text_fields]
-        
-        # If text_fields is provided, use it explicitly
-        if text_fields:
-            # Check if all specified fields exist in the batch
-            missing_fields = [field for field in text_fields if field not in batch]
-            if missing_fields:
-                raise ValueError(f"Text fields not found in batch: {missing_fields}")
-            
-            # If multiple fields, pass them as separate arguments
-            if len(text_fields) > 1:
-                field_values = [batch[field] for field in text_fields]
-                return self.tokenizer(
-                    *field_values,
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
-            else:
-                # Single field
-                return self.tokenizer(
-                    batch[text_fields[0]],
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
+    def tokenize(self, batch: Dict[str, List[Any]], text_field: Union[str, List[str]]) -> Dict[str, Any]:
+        """
+        Tokenize a batch of data.
 
-        # Fallback: GLUE-style paired inputs
-        if "premise" in batch and "hypothesis" in batch:
-            return self.tokenizer(
-                batch["premise"],
-                batch["hypothesis"],
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True,
-            )
-        # Fallback: Default to first string field found
-        for key, value in batch.items():
-            if isinstance(value, (str, list)) and value:
-                return self.tokenizer(
-                    value,
-                    padding="max_length",
-                    max_length=self.max_length,
-                    truncation=True,
-                )
-        
-        raise ValueError("No suitable text field found for tokenization.") 
+        Args:
+            batch: A dictionary containing lists of data.
+            text_field: The name of the field(s) containing text to tokenize.
+
+        Returns:
+            A dictionary containing the tokenized 'input_ids' and 'attention_mask'.
+        """
+        if isinstance(text_field, str):
+            text_to_tokenize = batch[text_field]
+            # Handle None values in single text field
+            text_to_tokenize = [text if text is not None else "" for text in text_to_tokenize]
+        else:
+            # Handle multiple text fields (e.g., premise, hypothesis)
+            # This simple concatenation works for many cases, but might need
+            # to be customized in specific loaders.
+            # Filter out None values and join the remaining text
+            text_to_tokenize = []
+            for example in zip(*(batch[field] for field in text_field)):
+                # Filter out None values and join the remaining text
+                valid_texts = [text for text in example if text is not None]
+                if valid_texts:
+                    text_to_tokenize.append(" ".join(valid_texts))
+                else:
+                    text_to_tokenize.append("")  # Empty string if all texts are None
+
+        return self.tokenizer(
+            text_to_tokenize,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length,
+        ) 

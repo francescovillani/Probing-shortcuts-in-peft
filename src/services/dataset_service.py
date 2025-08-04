@@ -630,23 +630,30 @@ class DatasetService:
         """Helper to load a dataset from a config dictionary."""
         config_obj = DatasetConfig.model_validate(config)
 
-        if config_obj.dataset_type and config_obj.dataset_type in self._custom_loaders:
+        if config_obj.dataset_type in self._custom_loaders:
             loader = self._get_custom_loader(config_obj.dataset_type)
             
             # Handle custom loader parameters
             loader_params = {}
-            if hasattr(config_obj, 'dataset_path') and config_obj.dataset_path:
-                loader_params['dataset_path'] = config_obj.dataset_path
-            if hasattr(config_obj, 'pickle_file') and config_obj.pickle_file:
-                loader_params['pickle_file'] = config_obj.pickle_file
-            if hasattr(config_obj, 'text_field') and config_obj.text_field:
-                loader_params['text_field'] = config_obj.text_field
+            
+            if config_obj.dataset_type == 'wilds':
+                loader_params = {
+                    'dataset_name': config_obj.name,
+                    'download': True # Assuming we always want to download if not present
+                }
+            else:
+                if hasattr(config_obj, 'dataset_path') and config_obj.dataset_path:
+                    loader_params['dataset_path'] = config_obj.dataset_path
+                if hasattr(config_obj, 'pickle_file') and config_obj.pickle_file:
+                    loader_params['pickle_file'] = config_obj.pickle_file
+                if hasattr(config_obj, 'text_field') and config_obj.text_field:
+                    loader_params['text_field'] = config_obj.text_field
+                # For custom loaders, use the name as dataset_path if no explicit dataset_path
+                if 'dataset_path' not in loader_params:
+                    loader_params['dataset_path'] = config_obj.name
+                
             if config_obj.split:
                 loader_params['split'] = config_obj.split
-                
-            # For custom loaders, use the name as dataset_path if no explicit dataset_path
-            if 'dataset_path' not in loader_params:
-                loader_params['dataset_path'] = config_obj.name
                 
             dataset = loader.load(**loader_params)
         elif config_obj.is_hf:
