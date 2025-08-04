@@ -80,6 +80,7 @@ def create_experiment_directory(config: TrainingConfig) -> Path:
     # Handle evaluation-only mode (no training dataset)
     if config.is_evaluation_only():
         dataset_clean = "evaluation"
+        peft_type = "load_peft"
     else:
         # Extract dataset name (handle different naming patterns)
         dataset_name = config.train_dataset.name
@@ -90,8 +91,8 @@ def create_experiment_directory(config: TrainingConfig) -> Path:
         if config.train_dataset.config:
             dataset_clean = f"{dataset_clean}_{config.train_dataset.config}"
     
-    # Extract PEFT type
-    peft_type = config.model.peft_config.peft_type
+        # Extract PEFT type
+        peft_type = config.model.peft_config.peft_type
     
     # Create timestamp for unique runs
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

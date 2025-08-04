@@ -15,7 +15,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 from config import ModelConfig
-from models.peft_factory import get_peft_model_factory
+from models.peft_factory import get_peft_model_factory, log_trainable_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,32 @@ class ModelService:
         # Save tokenizer
         tokenizer.save_pretrained(checkpoint_path)
         
+        # Custom logic to save classification head for prompt-based methods
+        if hasattr(model, "classification_heads_to_save"):
+            head_names = model.classification_heads_to_save
+            base_model = model.base_model if hasattr(model, "base_model") else model
+            
+            saved_heads = []
+            for head_name in head_names:
+                if hasattr(base_model, head_name):
+                    head_module = getattr(base_model, head_name)
+                    
+                    # Save the state dict of the classification head
+                    classifier_weights_path = checkpoint_path / f"{head_name}.pt"
+                    torch.save(head_module.state_dict(), classifier_weights_path)
+                    logger.info(f"Saved classification head '{head_name}' to {classifier_weights_path}")
+                    saved_heads.append(head_name)
+                else:
+                    logger.warning(f"Could not find head '{head_name}' to save.")
+
+            if saved_heads:
+                # Save the head name in a custom config for loading
+                import json
+                custom_config_path = checkpoint_path / "custom_config.json"
+                with open(custom_config_path, "w") as f:
+                    json.dump({"classification_heads_to_save": saved_heads}, f)
+                logger.info(f"Saved custom config with head names to {custom_config_path}")
+
         logger.info("Checkpoint saved successfully")
     
     def get_trainable_parameters(self, model: PreTrainedModel) -> Dict[str, int]:
@@ -214,6 +240,11 @@ class ModelService:
         # Print trainable parameters if PEFT model has the method
         if hasattr(model, "print_trainable_parameters"):
             model.print_trainable_parameters()
+            
+        # Add detailed parameter logging in debug mode
+        if logger.isEnabledFor(logging.DEBUG):
+            peft_type = info.get('peft_type', 'Unknown')
+            log_trainable_parameters(model, f"{peft_type.upper()} (ModelService)")
     
     def get_checkpoint_paths(self, checkpoint_dir: Union[str, Path]) -> List[Path]:
         """
