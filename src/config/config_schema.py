@@ -141,7 +141,7 @@ class DatasetConfig(BaseModel):
     """Dataset configuration settings"""
     name: str = Field(..., description="Dataset name or path")
     config: Optional[str] = Field(None, description="Dataset configuration name")
-    dataset_type: Literal["hf", "local", "wilds"] = Field("hf", description="Dataset type (hf, local, or wilds)")
+    dataset_type: Literal["hf", "local"] = Field("hf", description="Dataset type (hf, local)")
     batch_size: int = Field(..., description="Batch size")
     split: Optional[str] = Field(None, description="Dataset split to use")
     text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")

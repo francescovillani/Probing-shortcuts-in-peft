@@ -7,12 +7,10 @@ provided by the DatasetService.
 
 from .base_loader import BaseDatasetLoader
 from .phishing_loader import PhishingDatasetLoader
-from .wilds_loader import WildsDatasetLoader
 
 # Registry of all custom loaders
 CUSTOM_LOADERS = {
     'phishing': PhishingDatasetLoader,  # Alias for phishing
-    'wilds': WildsDatasetLoader,
 }
 
 def register_custom_loaders(service):
