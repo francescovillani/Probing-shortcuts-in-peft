@@ -11,7 +11,6 @@ from peft import (
     PromptTuningConfig,
     PrefixTuningConfig,
     PromptEncoderConfig,
-    # RandLoraConfig,
     PeftModel,
     PeftConfig,
 )
@@ -21,7 +20,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def set_requires_grad_by_path(model, param_path: str) -> bool:
+    """
+    Set requires_grad=True for a parameter at the given path.
 
+    Args:
+        model: The model to modify
+        param_path: Dot-separated path to the parameter (e.g., 'classifier.dense.weight')
+
+    Returns:
+        bool: True if parameter was found and modified, False otherwise
+    """
+    parts = param_path.split(".")
+    obj = model
+    try:
+        for part in parts:
+            obj = getattr(obj, part)
+        obj.requires_grad = True
+        logger.info(f"Successfully set requires_grad=True for parameter: {param_path}")
+        return True
+    except AttributeError as e:
+        logger.warning(f"Could not set requires_grad for {param_path}: {e}")
+        return False
+    
 def log_trainable_parameters(model, method_name: str = "PEFT") -> None:
     """
     Log detailed information about trainable parameters in the model.
@@ -102,113 +123,82 @@ def log_trainable_parameters(model, method_name: str = "PEFT") -> None:
 
 def unfreeze_classification_head(base_model, num_labels, peft_args, method_name):
     """
-    Unfreeze the classification head for prompt-based PEFT methods.
+    Unfreeze the classification head and/or specific parameters as requested via peft_args.
 
     This is critical because the classification head is randomly initialized when using
     AutoModelForSequenceClassification and needs to be trained.
 
     Args:
         base_model: The base model with the classification head
-        num_labels: Expected number of output labels
-        peft_args: PEFT arguments that may contain unfrozen_params or heads_to_save
+        num_labels: Expected number of output labels (currently unused)
+        peft_args: Dict that may contain:
+            - 'heads_to_save': list of classification head module names to unfreeze and later save.
+              Only top-level module names are supported for save/load compatibility.
+            - 'unfrozen_params': list of dotted parameter paths to set requires_grad=True (e.g.,
+              'classifier.dense.weight'). These are not considered classification heads to save.
         method_name: Name of the PEFT method for logging
 
     Returns:
-        Tuple of (classification_heads_found, custom_unfrozen_count)
+        classification_heads_found: List[str] of TOP-LEVEL classification head module names found
+            in the model and un-frozen. This list is intended to drive save/load of head weights.
     """
     classification_heads_found = []
 
-    # Allow user to specify heads to unfreeze
-    user_specified_heads = peft_args.get("heads_to_save", [])
+    heads_to_save = list(peft_args.get("heads_to_save", []))
+    param_paths_to_unfreeze = list(peft_args.get("unfrozen_params", []))
 
-    if user_specified_heads:
+    # Handle heads_to_save: unfreeze entire (top-level) modules and track for saving
+    if heads_to_save:
         logger.info(
-            f"[{method_name}] User specified heads to unfreeze: {user_specified_heads}"
+            f"[{method_name}] User specified heads to unfreeze: {heads_to_save}"
         )
-        for head_name in user_specified_heads:
-            if hasattr(base_model, head_name):
-                head_module = getattr(base_model, head_name)
-                param_count = sum(p.numel() for p in head_module.parameters())
-
-                for param in head_module.parameters():
-                    param.requires_grad = True
-
-                classification_heads_found.append(head_name)
-                logger.info(
-                    f"[{method_name}] Unfroze specified head '{head_name}' with {param_count:,} parameters"
+        for head_name in heads_to_save:
+            # Normalize to top-level attribute for save/load compatibility
+            top_level_name = head_name.split(".")[0]
+            if head_name != top_level_name:
+                logger.warning(
+                    f"[{method_name}] Specified head '{head_name}' includes a nested path. "
+                    f"Using top-level module '{top_level_name}' for save/load compatibility."
                 )
+
+            if hasattr(base_model, top_level_name):
+                head_module = getattr(base_model, top_level_name)
+
+                # If we actually resolved a module, unfreeze all its parameters
+                if hasattr(head_module, "parameters"):
+                    param_count = sum(p.numel() for p in head_module.parameters())
+                    for param in head_module.parameters():
+                        param.requires_grad = True
+                    if top_level_name not in classification_heads_found:
+                        classification_heads_found.append(top_level_name)
+                    logger.info(
+                        f"[{method_name}] Unfroze head module '{top_level_name}' with {param_count:,} parameters"
+                    )
+                else:
+                    # Fallback: if it's not a module, try treating the original head_name as a parameter path
+                    # This is unusual for heads_to_save, but we attempt to honor the intent
+                    success = set_requires_grad_by_path(base_model, head_name)
+                    if not success:
+                        logger.warning(
+                            f"[{method_name}] Could not unfreeze '{head_name}' as module or parameter path."
+                        )
             else:
                 logger.warning(
-                    f"[{method_name}] Specified head '{head_name}' not found in the model."
+                    f"[{method_name}] Specified head module '{top_level_name}' not found in the model."
                 )
-    else:
-        # Determine model family and expected head names
-        model_type = type(base_model).__name__
-        if "bert" in model_type.lower():
-            expected_heads = ["classifier"]
-        elif "roberta" in model_type.lower():
-            expected_heads = ["classifier"]
-        elif "electra" in model_type.lower():
-            expected_heads = ["classifier"]
-        elif "deberta" in model_type.lower():
-            expected_heads = ["classifier"]
-        elif "distilbert" in model_type.lower():
-            expected_heads = ["classifier"]
-        elif any(
-            arch in model_type.lower()
-            for arch in ["gpt", "opt", "bloom", "llama", "mistral"]
-        ):
-            expected_heads = ["score"]
-        else:
-            expected_heads = ["classifier", "score", "head"]
 
-        # Find and unfreeze classification heads
-        for head_name in expected_heads:
-            if hasattr(base_model, head_name):
-                head_module = getattr(base_model, head_name)
-                param_count = sum(p.numel() for p in head_module.parameters())
-
-                for param in head_module.parameters():
-                    param.requires_grad = True
-
-                classification_heads_found.append(head_name)
-                logger.info(
-                    f"[{method_name}] Unfroze classification head '{head_name}' with {param_count:,} parameters"
-                )
-                break  # Only unfreeze the first match
-
-        # Fallback: look for linear layers with correct output size if no standard head found
-        if not classification_heads_found:
-            logger.warning(
-                f"[{method_name}] No standard classification heads found. Searching for linear layers..."
-            )
-            for name, module in base_model.named_modules():
-                if (
-                    isinstance(module, torch.nn.Linear)
-                    and module.out_features == num_labels
-                ):
-                    param_count = sum(p.numel() for p in module.parameters())
-                    for param in module.parameters():
-                        param.requires_grad = True
-                    classification_heads_found.append(name)
-                    logger.info(
-                        f"[{method_name}] Unfroze linear layer '{name}' with {param_count:,} parameters"
-                    )
-                    break
-
-    # Allow additional custom parameters to be unfrozen if specified
-    unfrozen_params = peft_args.get("unfrozen_params", [])
-    custom_unfrozen_count = 0
-
-    if unfrozen_params:
+    # Handle unfrozen_params: set requires_grad=True on arbitrary parameter paths
+    if param_paths_to_unfreeze:
         logger.info(
-            f"[{method_name}] Attempting to unfreeze {len(unfrozen_params)} custom parameter path(s)"
+            f"[{method_name}] User specified parameter paths to unfreeze: {param_paths_to_unfreeze}"
         )
-        for param_path in unfrozen_params:
-            if set_requires_grad_by_path(base_model, param_path):
-                custom_unfrozen_count += 1
+        for param_path in param_paths_to_unfreeze:
+            # Avoid re-processing entries that were already covered by heads_to_save
+            if param_path.split(".")[0] in classification_heads_found:
+                continue
+            _ = set_requires_grad_by_path(base_model, param_path)
 
-    return classification_heads_found, custom_unfrozen_count
+    return classification_heads_found
 
 
 # Base factory class
@@ -288,34 +278,16 @@ class PromptTuningModelFactory(PEFTModelFactory):
             self.model_name, num_labels=self.num_labels
         )
 
-        # Freeze all parameters first
-        for param in base_model.parameters():
-            param.requires_grad = False
-
         # Create PEFT config and apply it
         peft_config_args = self.peft_args.copy()
-        peft_config_args.pop("heads_to_save", None)
-        peft_config_args.pop("unfrozen_params", None)
         config = PromptTuningConfig(**peft_config_args)
         model = get_peft_model(base_model, config)
-
-        # Unfreeze the classification head after applying PEFT
-        classification_heads_found, custom_unfrozen_count = (
-            unfreeze_classification_head(
-                base_model, self.num_labels, self.peft_args, "Prompt Tuning"
-            )
-        )
-        if classification_heads_found:
-            model.classification_heads_to_save = classification_heads_found
 
         # Log statistics
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
         percentage = 100 * trainable_params / total_params if total_params > 0 else 0
 
-        logger.info(f"Prompt Tuning setup complete:")
-        logger.info(f"  - Classification heads unfrozen: {classification_heads_found}")
-        logger.info(f"  - Custom parameters unfrozen: {custom_unfrozen_count}")
         logger.info(
             f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
         )
@@ -332,34 +304,15 @@ class PrefixTuningModelFactory(PEFTModelFactory):
             self.model_name, num_labels=self.num_labels
         )
 
-        # Freeze all parameters first
-        for param in base_model.parameters():
-            param.requires_grad = False
-
         # Create PEFT config and apply it
         peft_config_args = self.peft_args.copy()
-        peft_config_args.pop("heads_to_save", None)
-        peft_config_args.pop("unfrozen_params", None)
         config = PrefixTuningConfig(**peft_config_args)
         model = get_peft_model(base_model, config)
-
-        # Unfreeze the classification head after applying PEFT
-        classification_heads_found, custom_unfrozen_count = (
-            unfreeze_classification_head(
-                base_model, self.num_labels, self.peft_args, "Prefix Tuning"
-            )
-        )
-        if classification_heads_found:
-            model.classification_heads_to_save = classification_heads_found
 
         # Log statistics
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
         percentage = 100 * trainable_params / total_params if total_params > 0 else 0
-
-        logger.info(f"Prefix Tuning setup complete:")
-        logger.info(f"  - Classification heads unfrozen: {classification_heads_found}")
-        logger.info(f"  - Custom parameters unfrozen: {custom_unfrozen_count}")
         logger.info(
             f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
         )
@@ -376,34 +329,16 @@ class PTuningModelFactory(PEFTModelFactory):
             self.model_name, num_labels=self.num_labels
         )
 
-        # Freeze all parameters first
-        for param in base_model.parameters():
-            param.requires_grad = False
-
         # Create PEFT config and apply it
         peft_config_args = self.peft_args.copy()
-        peft_config_args.pop("heads_to_save", None)
-        peft_config_args.pop("unfrozen_params", None)
         config = PromptEncoderConfig(**peft_config_args)
         model = get_peft_model(base_model, config)
-
-        # Unfreeze the classification head after applying PEFT
-        classification_heads_found, custom_unfrozen_count = (
-            unfreeze_classification_head(
-                base_model, self.num_labels, self.peft_args, "P-Tuning v2"
-            )
-        )
-        if classification_heads_found:
-            model.classification_heads_to_save = classification_heads_found
 
         # Log statistics
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
         percentage = 100 * trainable_params / total_params if total_params > 0 else 0
 
-        logger.info(f"P-Tuning v2 setup complete:")
-        logger.info(f"  - Classification heads unfrozen: {classification_heads_found}")
-        logger.info(f"  - Custom parameters unfrozen: {custom_unfrozen_count}")
         logger.info(
             f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
         )
@@ -411,30 +346,6 @@ class PTuningModelFactory(PEFTModelFactory):
         if self.device:
             model = model.to(self.device)
         return model
-
-
-def set_requires_grad_by_path(model, param_path: str) -> bool:
-    """
-    Set requires_grad=True for a parameter at the given path.
-
-    Args:
-        model: The model to modify
-        param_path: Dot-separated path to the parameter (e.g., 'classifier.dense.weight')
-
-    Returns:
-        bool: True if parameter was found and modified, False otherwise
-    """
-    parts = param_path.split(".")
-    obj = model
-    try:
-        for part in parts:
-            obj = getattr(obj, part)
-        obj.requires_grad = True
-        logger.info(f"Successfully set requires_grad=True for parameter: {param_path}")
-        return True
-    except AttributeError as e:
-        logger.warning(f"Could not set requires_grad for {param_path}: {e}")
-        return False
 
 
 # BitFit factory
@@ -452,17 +363,23 @@ class BitFitModelFactory(PEFTModelFactory):
             if isinstance(module, torch.nn.Linear) and module.bias is not None:
                 module.bias.requires_grad = True
 
-        classification_heads_found, custom_unfrozen_count = (
+        classification_heads_found = (
             unfreeze_classification_head(
                 model, self.num_labels, self.peft_args, "BitFit"
             )
         )
         if classification_heads_found:
             model.classification_heads_to_save = classification_heads_found
-
-        unfrozen_params = self.peft_args.get("unfrozen_params", [])
-        for param_path in unfrozen_params:
-            set_requires_grad_by_path(model, param_path)
+            
+        # Log statistics
+        trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        percentage = 100 * trainable_params / total_params if total_params > 0 else 0
+        logger.info(
+            f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
+        )
 
         if self.device:
             model = model.to(self.device)
@@ -493,7 +410,7 @@ class ClassifierOnlyModelFactory(PEFTModelFactory):
         for param in model.parameters():
             param.requires_grad = False
 
-        classification_heads_found, custom_unfrozen_count = (
+        classification_heads_found = (
             unfreeze_classification_head(
                 model, self.num_labels, self.peft_args, "Classifier-only"
             )
