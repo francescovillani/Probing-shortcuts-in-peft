@@ -109,7 +109,7 @@ class ConfigManager:
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     
     def _apply_env_overrides(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
