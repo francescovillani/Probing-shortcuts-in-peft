@@ -141,7 +141,7 @@ class DatasetConfig(BaseModel):
     """Dataset configuration settings"""
     name: str = Field(..., description="Dataset name or path")
     config: Optional[str] = Field(None, description="Dataset configuration name")
-    dataset_type: Literal["hf", "local"] = Field("hf", description="Dataset type (hf, local)")
+    dataset_type: str = Field("hf", description="Dataset type (hf, local, or custom loader name)")
     batch_size: int = Field(..., description="Batch size")
     split: Optional[str] = Field(None, description="Dataset split to use")
     text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")
@@ -162,6 +162,11 @@ class DatasetConfig(BaseModel):
     @property
     def is_local(self) -> bool:
         return self.dataset_type == "local"
+    
+    @property
+    def is_custom(self) -> bool:
+        """Check if this is a custom dataset type (not hf or local)"""
+        return self.dataset_type not in ["hf", "local"]
 
     @field_validator("batch_size")
     @classmethod
