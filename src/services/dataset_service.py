@@ -281,14 +281,14 @@ class DatasetService:
         
         logger.info(f"Splitting deduplicated dataset of {total_size} samples: {train_count} train, {test_count} test")
         logger.info(f"Split proportions: train={train_size:.2f}, test={test_size:.2f}")
-        logger.info(f"Using split seed: {split_seed}")
+        logger.info(f"Using split seed: {self.seed}")
         
         # Create a deterministic split using the provided seed
         # We'll use the dataset's built-in train_test_split method for consistency
         split_datasets = actual_dataset.train_test_split(
             train_size=train_size,
             test_size=test_size,
-            seed=split_seed,
+            seed=self.seed,
             stratify_by_column=stratify_by
         )
         
@@ -334,7 +334,7 @@ class DatasetService:
             dataset=base_dataset,
             train_size=base_config.splitting.train_size,
             test_size=base_config.splitting.test_size,
-            split_seed=base_config.splitting.split_seed,
+            split_seed=self.seed,
             stratify_by=base_config.splitting.stratify_by
         )
         
@@ -676,7 +676,7 @@ class DatasetService:
                 dataset=base_dataset,
                 train_size=config_obj.splitting.train_size,
                 test_size=config_obj.splitting.test_size,
-                split_seed=config_obj.splitting.split_seed,
+                split_seed=self.seed,
                 stratify_by=config_obj.splitting.stratify_by
             )
             
