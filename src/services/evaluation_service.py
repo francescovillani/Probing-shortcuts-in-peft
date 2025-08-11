@@ -164,14 +164,17 @@ class EvaluationService:
                         triggered_batch[key] = triggered_batch[key][:batch_size]
                 
                 try:
+                    # Extract the backbone for proper model type detection
+                    backbone = self._get_model_backbone(model)
+                    
                     # Extract hidden states for both clean and triggered examples
                     _, clean_hidden = self._extract_embeddings_and_hidden_states(model, clean_batch)
                     _, triggered_hidden = self._extract_embeddings_and_hidden_states(model, triggered_batch)
                     
                     # Use CLS token representation from last hidden state
                     # Handle different model architectures for CLS token position
-                    clean_hidden_cls = self._extract_cls_representation(clean_hidden, clean_batch)
-                    triggered_hidden_cls = self._extract_cls_representation(triggered_hidden, triggered_batch)
+                    clean_hidden_cls = self._extract_cls_representation(clean_hidden, clean_batch, backbone)
+                    triggered_hidden_cls = self._extract_cls_representation(triggered_hidden, triggered_batch, backbone)
                     
                     # Compute cosine similarities in batch
                     batch_similarities = F.cosine_similarity(clean_hidden_cls, triggered_hidden_cls, dim=1)
@@ -210,27 +213,37 @@ class EvaluationService:
         
         return results
 
-    def _extract_cls_representation(self, hidden_states: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _get_model_backbone(self, model):
         """
-        Extract CLS token representation from hidden states.
+        Extract the actual backbone model from potentially nested PEFT models.
         
         Args:
-            hidden_states: Hidden states tensor [batch_size, seq_len, hidden_dim]
-            batch: Input batch dictionary
+            model: The model (potentially wrapped in PEFT)
             
         Returns:
-            CLS representations [batch_size, hidden_dim]
+            The backbone transformer model
         """
-        # For most transformer models, CLS token is at position 0
-        # But we should handle cases where it might be different
+        # Get model's base architecture (handles PEFT models)
+        if hasattr(model, 'base_model'):
+            # For PEFT models, get the base model
+            base_model = model.base_model
+            if hasattr(base_model, 'model'):
+                # For some PEFT models, need to go deeper
+                backbone = base_model.model
+            else:
+                backbone = base_model
+        else:
+            # For regular models
+            backbone = model
         
-        # Default: use first token (position 0) as CLS
-        cls_representations = hidden_states[:, 0, :]
-        
-        # For models that might have different CLS positions, we could add logic here
-        # For now, position 0 works for BERT, RoBERTa, DistilBERT
-        
-        return cls_representations
+        # Additional layer for complex PEFT hierarchies
+        # Some models have nested structures like PeftModel -> Model -> TransformerModel
+        if hasattr(backbone, 'base_model') and hasattr(backbone.base_model, 'model'):
+            backbone = backbone.base_model.model
+        elif hasattr(backbone, 'base_model'):
+            backbone = backbone.base_model
+            
+        return backbone
 
     def compute_confidence_metrics(
         self,
@@ -430,8 +443,22 @@ class EvaluationService:
         elif hasattr(backbone, 'base_model'):
             backbone = backbone.base_model
         
-        # For RoBERTa-style models
-        if hasattr(backbone, 'roberta'):
+        # For direct RoBERTa model instances (when backbone is the RobertaModel itself)
+        if hasattr(backbone, 'embeddings') and hasattr(backbone, 'encoder') and hasattr(backbone, 'pooler') and 'roberta' in str(type(backbone)).lower():
+            # Direct RoBERTa architecture (e.g., when using base RobertaModel)
+            embeddings = backbone.embeddings(input_ids=batch['input_ids'])
+            
+            # Get hidden states from the RoBERTa model
+            roberta_outputs = backbone(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                return_dict=True,
+                output_hidden_states=True
+            )
+            hidden_states = roberta_outputs.last_hidden_state
+            
+        # For RoBERTa-style models (wrapped)
+        elif hasattr(backbone, 'roberta'):
             # Get embeddings from the embedding layer
             embeddings = backbone.roberta.embeddings(input_ids=batch['input_ids'])
             
@@ -444,6 +471,24 @@ class EvaluationService:
                 output_hidden_states=True
             )
             hidden_states = roberta_outputs.last_hidden_state
+            
+        # For direct BERT model instances (when backbone is the BertModel itself)
+        elif hasattr(backbone, 'embeddings') and hasattr(backbone, 'encoder') and hasattr(backbone, 'pooler') and 'bert' in str(type(backbone)).lower():
+            # Direct BERT architecture (e.g., when using base BertModel)
+            embeddings = backbone.embeddings(
+                input_ids=batch['input_ids'],
+                token_type_ids=batch.get('token_type_ids')
+            )
+            
+            # Get hidden states from the BERT model
+            bert_outputs = backbone(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                token_type_ids=batch.get('token_type_ids'),
+                return_dict=True,
+                output_hidden_states=True
+            )
+            hidden_states = bert_outputs.last_hidden_state
             
         # For BERT-style models  
         elif hasattr(backbone, 'bert'):
@@ -463,6 +508,20 @@ class EvaluationService:
             )
             hidden_states = bert_outputs.last_hidden_state
             
+        # For direct DistilBERT model instances (when backbone is the DistilBertModel itself)
+        elif hasattr(backbone, 'embeddings') and hasattr(backbone, 'transformer') and 'distilbert' in str(type(backbone)).lower():
+            # Direct DistilBERT architecture (e.g., when using base DistilBertModel)
+            embeddings = backbone.embeddings(batch['input_ids'])
+            
+            # Get hidden states from the DistilBERT model
+            distilbert_outputs = backbone(
+                input_ids=batch['input_ids'],
+                attention_mask=batch.get('attention_mask'),
+                return_dict=True,
+                output_hidden_states=True
+            )
+            hidden_states = distilbert_outputs.last_hidden_state
+
         # For DistilBERT-style models
         elif hasattr(backbone, 'distilbert'):
             # Get embeddings from the embedding layer
@@ -525,6 +584,59 @@ class EvaluationService:
                             f"Please add support for this model type.")
         
         return embeddings, hidden_states
+
+    def _extract_cls_representation(self, hidden_states: torch.Tensor, batch: Dict[str, torch.Tensor], model_backbone=None) -> torch.Tensor:
+        """
+        Extract CLS token representation from hidden states.
+        
+        Args:
+            hidden_states: Hidden states tensor [batch_size, seq_len, hidden_dim]
+            batch: Input batch dictionary
+            model_backbone: The model backbone to determine architecture type
+            
+        Returns:
+            CLS representations [batch_size, hidden_dim]
+        """
+        # Determine model type for appropriate representation extraction
+        is_llama_style = False
+        
+        if model_backbone is not None:
+            model_type_str = str(type(model_backbone)).lower()
+            # Check for LLAMA-style models (including Mistral, Alpaca, etc.)
+            is_llama_style = any(model_name in model_type_str for model_name in 
+                               ['llama', 'mistral', 'alpaca', 'vicuna', 'codellama'])
+            
+            # Also check for direct LLAMA attributes
+            if not is_llama_style:
+                is_llama_style = (hasattr(model_backbone, 'embed_tokens') and hasattr(model_backbone, 'layers')) or \
+                               (hasattr(model_backbone, 'model') and hasattr(model_backbone.model, 'embed_tokens'))
+        
+        if is_llama_style and 'attention_mask' in batch:
+            # For LLAMA-style models, use mean pooling over all tokens
+            # This is often more meaningful than just the last token for similarity analysis
+            logger.debug(f"Using mean pooling extraction for LLAMA-style model: {type(model_backbone)}")
+            
+            attention_mask = batch['attention_mask']  # [batch_size, seq_len]
+            
+            # Mean pooling: average over all non-padding tokens
+            # This captures the full sequence representation, not just the last token
+            expanded_mask = attention_mask.unsqueeze(-1).expand_as(hidden_states).float()
+            sum_embeddings = torch.sum(hidden_states * expanded_mask, dim=1)
+            sum_mask = torch.sum(expanded_mask, dim=1)
+            cls_representations = sum_embeddings / (sum_mask + 1e-9)  # Add epsilon to avoid division by zero
+            
+            # Alternative last-token approach (commented out for now)
+            # last_token_indices = attention_mask.sum(dim=1) - 1  # [batch_size]
+            # last_token_indices = torch.clamp(last_token_indices, 0, hidden_states.size(1) - 1)
+            # batch_size = hidden_states.size(0)
+            # cls_representations = hidden_states[torch.arange(batch_size), last_token_indices]
+            
+        else:
+            # For BERT/RoBERTa/DistilBERT-style models, use CLS token at position 0
+            logger.debug(f"Using CLS-token (position 0) extraction for model: {type(model_backbone) if model_backbone else 'Unknown'}")
+            cls_representations = hidden_states[:, 0, :]
+            
+        return cls_representations
 
     def _evaluate_model(
         self,
