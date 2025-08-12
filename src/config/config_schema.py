@@ -3,6 +3,22 @@ from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 
 
+class PromptConfig(BaseModel):
+    """Configuration for dataset-specific prompting (for decoder models)"""
+    enabled: bool = Field(False, description="Whether to apply dataset-specific prompting")
+    template: Optional[str] = Field(None, description="Custom prompt template. Use {field_name} placeholders for dataset fields")
+    auto_detect: bool = Field(True, description="Whether to auto-detect and apply appropriate prompt template based on dataset structure")
+    answer_prefix: str = Field("Answer:", description="Prefix token before the expected answer/label")
+    include_label_options: bool = Field(True, description="Whether to include possible label options in the prompt")
+    
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, v):
+        if v is not None and "{" not in v:
+            raise ValueError("Prompt template must contain at least one placeholder (e.g., {premise})")
+        return v
+
+
 class PEFTConfig(BaseModel):
     """PEFT configuration settings"""
     peft_type: str = Field("none", description="Type of PEFT to use")
@@ -147,6 +163,7 @@ class DatasetConfig(BaseModel):
     text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")
     label_field: Optional[str] = Field(None, description="Label field to use")
     poisoning: Optional[PoisoningConfig] = Field(default=None, description="Dataset poisoning configuration")
+    prompting: Optional[PromptConfig] = Field(default=None, description="Dataset prompting configuration for decoder models")
     trust_remote_code: bool = Field(False, description="Allow execution of code from dataset authors")
     splitting: Optional[SplittingConfig] = Field(default=None, description="Dataset splitting configuration")
     is_hans: bool = Field(False, description="Whether dataset is HANS")

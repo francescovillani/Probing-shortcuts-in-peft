@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Union, Tuple, Type, Any
 from torch.utils.data import DataLoader, Dataset
 from datasets import DatasetDict, load_dataset, load_from_disk
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedModel
 from pathlib import Path
 import os
 import sys
@@ -21,6 +21,7 @@ import hashlib
 sys.path.append(str(Path(__file__).parent.parent))
 from config import DatasetConfig
 from loaders.base_loader import BaseDatasetLoader
+from services.prompt_templates import PromptTemplateService
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +124,16 @@ class DatasetService:
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
         seed: int = 42,
+        model: Optional[PreTrainedModel] = None,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.seed = seed
+        self.model = model
         self.hf_loader = HuggingFaceLoader(tokenizer, max_length)
         self.local_loader = LocalDatasetLoader(tokenizer, max_length)
         self._custom_loader_instances = {}
+        self.prompt_service = PromptTemplateService(tokenizer=tokenizer, max_length=max_length)
         
         # Auto-register custom loaders if available
         if _custom_loaders_available:
@@ -137,6 +141,105 @@ class DatasetService:
             logger.info(f"Registered custom dataset loaders: {list(self._custom_loaders.keys())}")
         else:
             logger.info("No custom loaders available")
+
+    def _calculate_prompt_overhead(
+        self,
+        dataset: Dataset,
+        prompt_config: Optional['DatasetConfig'] = None
+    ) -> int:
+        """
+        Calculate the token overhead from prompt templates.
+        
+        Args:
+            dataset: The dataset to analyze
+            prompt_config: Configuration containing prompting settings
+            
+        Returns:
+            Number of tokens used by the prompt template (excluding actual text content)
+        """
+        if not prompt_config or not prompt_config.prompting or not prompt_config.prompting.enabled:
+            return 0
+                
+        # Get a sample example to estimate prompt overhead
+        if len(dataset) == 0:
+            return 0
+            
+        sample_example = dataset[0]
+        
+        # Determine text fields
+        text_fields = prompt_config.text_field
+        if text_fields is None:
+            common_text_fields = ["text", "sentence", "premise", "hypothesis", "sentence1", "sentence2"]
+            found_fields = [field for field in common_text_fields if field in dataset.column_names]
+            if found_fields:
+                text_fields = found_fields if len(found_fields) > 1 else found_fields[0]
+            else:
+                return 0
+        
+        # Create a minimal example with short placeholder texts to measure template overhead
+        minimal_example = {}
+        if isinstance(text_fields, str):
+            minimal_example[text_fields] = "x"  # Single character placeholder
+        else:
+            for field in text_fields:
+                minimal_example[field] = "x"  # Single character placeholder
+        
+        # Add other fields from the sample (non-text fields)
+        for key, value in sample_example.items():
+            if key not in minimal_example and not isinstance(value, str):
+                minimal_example[key] = value
+        
+        try:
+            # Apply prompting to the minimal example
+            # Create a temporary dataset with the minimal example
+            from datasets import Dataset as HFDataset
+            temp_dataset = HFDataset.from_dict({
+                key: [value] for key, value in minimal_example.items()
+            })
+            
+            prompted_dataset = self.prompt_service.apply_prompting(
+                dataset=temp_dataset,
+                dataset_name=prompt_config.name,
+                text_fields=text_fields,
+                template=prompt_config.prompting.template,
+                answer_prefix=prompt_config.prompting.answer_prefix,
+            )
+            
+            if "prompted_text" in prompted_dataset[0]:
+                prompted_text = prompted_dataset[0]["prompted_text"]
+                
+                # Tokenize the prompted text
+                prompted_tokens = self.tokenizer.encode(prompted_text, add_special_tokens=False)
+                
+                # Calculate the overhead by subtracting the content tokens
+                # We used single 'x' characters, so count them
+                if isinstance(text_fields, str):
+                    content_chars = 1
+                else:
+                    content_chars = len(text_fields)
+                
+                # Estimate content tokens (conservative estimate: 1 token per character)
+                content_tokens = content_chars
+                
+                prompt_overhead = max(0, len(prompted_tokens) - content_tokens)
+                
+                logger.debug(f"Estimated prompt overhead: {prompt_overhead} tokens (total: {len(prompted_tokens)}, content: {content_tokens})")
+                return prompt_overhead
+            
+        except Exception as e:
+            logger.warning(f"Failed to calculate prompt overhead: {e}")
+            
+            # Fallback: estimate based on template length
+            if prompt_config.prompting and prompt_config.prompting.template:
+                # Rough estimate: tokenize the template directly
+                template_tokens = self.tokenizer.encode(prompt_config.prompting.template, add_special_tokens=False)
+                # Subtract placeholder tokens (rough estimate)
+                placeholder_count = prompt_config.prompting.template.count('{')
+                estimated_overhead = max(0, len(template_tokens) - placeholder_count * 2)
+                logger.info(f"Using fallback prompt overhead estimate: {estimated_overhead} tokens")
+                return estimated_overhead
+            
+        return 0
 
     def load_dataset(self, config: DatasetConfig) -> Dataset:
         """Load dataset based on configuration."""
@@ -151,7 +254,8 @@ class DatasetService:
         injection_percentage: float = 0.1,
         injection_position: str = 'start',
         label_column: str = "label",
-        filter_labels: Optional[List[Union[int, str]]] = None
+        filter_labels: Optional[List[Union[int, str]]] = None,
+        prompt_config: Optional['DatasetConfig'] = None  # Add prompt config to account for template length
     ) -> Dataset:
         """Apply poisoning/trigger injection to a dataset."""
         return self._inject_trigger_into_dataset(
@@ -162,7 +266,8 @@ class DatasetService:
             injection_percentage=injection_percentage,
             injection_position=injection_position,
             label_column=label_column,
-            filter_labels=filter_labels
+            filter_labels=filter_labels,
+            prompt_config=prompt_config
         )
     
     def apply_splitting(
@@ -299,6 +404,59 @@ class DatasetService:
         
         return train_dataset, test_dataset
     
+    def apply_prompting(
+        self,
+        dataset: Dataset,
+        config: DatasetConfig,
+        force_prompting: bool = False
+    ) -> Dataset:
+        """
+        Apply dataset-specific prompting for decoder models.
+        
+        Args:
+            dataset: The dataset to apply prompting to
+            config: Dataset configuration with prompting settings
+            force_prompting: Whether to force prompting even for non-decoder models
+            
+        Returns:
+            Dataset with prompting applied (if applicable)
+        """
+        # Check if prompting should be applied
+        should_apply_prompting = (
+            config.prompting and 
+            config.prompting.enabled
+        )
+        
+        if not should_apply_prompting:
+            if config.prompting and config.prompting.enabled and not force_prompting:
+                logger.info("Prompting is enabled but model is not a decoder model, skipping prompting")
+            return dataset
+        
+        logger.info(f"Applying prompting to dataset: {config.name}")
+        
+        # Determine text fields to use
+        text_fields = config.text_field
+        if text_fields is None:
+            # Auto-detect text fields
+            common_text_fields = ["text", "sentence", "premise", "hypothesis", "sentence1", "sentence2"]
+            found_fields = [field for field in common_text_fields if field in dataset.column_names]
+            if found_fields:
+                text_fields = found_fields if len(found_fields) > 1 else found_fields[0]
+            else:
+                logger.warning("No text fields detected for prompting")
+                return dataset
+        
+        # Apply prompting using the prompt service
+        prompted_dataset = self.prompt_service.apply_prompting(
+            dataset=dataset,
+            dataset_name=config.name,
+            text_fields=text_fields,
+            template=config.prompting.template,
+            answer_prefix=config.prompting.answer_prefix,
+        )
+        
+        return prompted_dataset
+    
     def create_split_datasets(
         self,
         base_config: DatasetConfig,
@@ -345,7 +503,15 @@ class DatasetService:
                 poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
                 train_dataset = self.apply_poisoning(
                     dataset=train_dataset,
+                    prompt_config=train_config,  # Pass prompt config for length calculations
                     **poison_params
+                )
+            
+            if train_config.prompting and train_config.prompting.enabled:
+                logger.info("Applying prompting to training dataset")
+                train_dataset = self.apply_prompting(
+                    dataset=train_dataset,
+                    config=train_config
                 )
         
         # Apply any test-specific configurations
@@ -355,7 +521,15 @@ class DatasetService:
                 poison_params = test_config.poisoning.model_dump(exclude={'enabled'})
                 test_dataset = self.apply_poisoning(
                     dataset=test_dataset,
+                    prompt_config=test_config,  # Pass prompt config for length calculations
                     **poison_params
+                )
+            
+            if test_config.prompting and test_config.prompting.enabled:
+                logger.info("Applying prompting to test dataset")
+                test_dataset = self.apply_prompting(
+                    dataset=test_dataset,
+                    config=test_config
                 )
         
         logger.info(f"Successfully created coordinated splits: {len(train_dataset)} train, {len(test_dataset)} test")
@@ -479,6 +653,11 @@ class DatasetService:
         """
         text_fields = {}
         
+        # Priority 1: Check for prompted_text field (for decoder models)
+        if "prompted_text" in example:
+            text_fields["prompted_text"] = str(example["prompted_text"])
+            logger.debug("Found prompted_text field in debug sample")
+        
         # If text_field is specified, use it directly
         if text_field is not None:
             if isinstance(text_field, str):
@@ -493,8 +672,8 @@ class DatasetService:
                 else:
                     logger.warning(f"Specified text field '{field_name}' not found in example keys: {list(example.keys())}")
             
-            # Return early if we found the specified fields
-            if text_fields:
+            # Return early if we found the specified fields (but keep prompted_text if it exists)
+            if any(field != "prompted_text" for field in text_fields.keys()):
                 return text_fields
         
         # Fallback: auto-detection logic
@@ -507,14 +686,14 @@ class DatasetService:
             if col_name in ["labels", "label", "input_ids", "attention_mask", "token_type_ids", "has_trigger"]:
                 continue
                 
-            # Include if it's a known text column or if it's a string value
-            if col_name in text_columns or isinstance(value, str):
+            # Include if it's a known text column or if it's a string value (but don't duplicate prompted_text)
+            if (col_name in text_columns or isinstance(value, str)) and col_name not in text_fields:
                 text_fields[col_name] = str(value)
         
-        # If no text fields found, try to find any string values
-        if not text_fields:
+        # If no text fields found (other than prompted_text), try to find any string values
+        if len(text_fields) <= 1 and "prompted_text" in text_fields:  # Only prompted_text exists
             for col_name, value in example.items():
-                if isinstance(value, str) and len(value) > 0:
+                if isinstance(value, str) and len(value) > 0 and col_name not in text_fields:
                     text_fields[col_name] = value
         
         return text_fields
@@ -573,7 +752,16 @@ class DatasetService:
                 poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
                 train_dataset = self.apply_poisoning(
                     dataset=train_dataset,
+                    prompt_config=train_config,  # Pass prompt config for length calculations
                     **poison_params
+                )
+            
+            # Apply prompting if configured (AFTER poisoning but BEFORE debug samples and tokenization)
+            if train_config.prompting and train_config.prompting.enabled:
+                logger.info("Applying prompting to training dataset")
+                train_dataset = self.apply_prompting(
+                    dataset=train_dataset,
+                    config=train_config
                 )
             
             # Store raw dataset if requested (AFTER all transformations but BEFORE tokenization)
@@ -609,7 +797,16 @@ class DatasetService:
                     poison_params = val_config.poisoning.model_dump(exclude={'enabled'})
                     val_dataset = self.apply_poisoning(
                         dataset=val_dataset,
+                        prompt_config=val_config,  # Pass prompt config for length calculations
                         **poison_params
+                    )
+                
+                # Apply prompting if configured (AFTER poisoning but BEFORE debug samples and tokenization)
+                if val_config.prompting and val_config.prompting.enabled:
+                    logger.info(f"Applying prompting to validation dataset: {val_name}")
+                    val_dataset = self.apply_prompting(
+                        dataset=val_dataset,
+                        config=val_config
                     )
                 
                 # Extract debug samples AFTER poisoning but BEFORE tokenization
@@ -721,9 +918,15 @@ class DatasetService:
         else:
             loader = self.hf_loader
         
+        # For decoder models with prompting, use prompted_text field if available
+        actual_text_field = text_field
+        if "prompted_text" in dataset.column_names:
+            actual_text_field = "prompted_text"
+            logger.info("Using prompted_text field for tokenization in decoder model")
+        
         # Tokenize using the appropriate loader
         dataset = dataset.map(
-            lambda batch: loader.tokenize(batch, text_field),
+            lambda batch: loader.tokenize(batch, actual_text_field),
             batched=True
         )
         
@@ -764,7 +967,8 @@ class DatasetService:
         injection_percentage: float = 0.1,
         injection_position: str = 'start',
         label_column: str = "label",
-        filter_labels: Optional[List[Union[int, str]]] = None
+        filter_labels: Optional[List[Union[int, str]]] = None,
+        prompt_config: Optional['DatasetConfig'] = None  # Add prompt config to account for template length
     ) -> Union[Dataset, DatasetDict]:
         """Inject triggers into dataset (extracted from dataset_modifiers)."""
         
@@ -785,7 +989,8 @@ class DatasetService:
                     injection_percentage,
                     injection_position,
                     target_label,
-                    label_column
+                    label_column,
+                    prompt_config
                 )
                 for split, split_dataset in dataset.items()
             })
@@ -797,7 +1002,8 @@ class DatasetService:
                 injection_percentage,
                 injection_position,
                 target_label,
-                label_column
+                label_column,
+                prompt_config
             )
         
         # Filter by labels if specified
@@ -824,7 +1030,8 @@ class DatasetService:
         injection_percentage: float,
         injection_position: str,
         target_label: Union[int, str, List[Union[int, str]]],
-        label_column: str = "label"
+        label_column: str = "label",
+        prompt_config: Optional['DatasetConfig'] = None
     ) -> Dataset:
         """Helper function to inject triggers into a single dataset split."""
         
@@ -839,8 +1046,16 @@ class DatasetService:
         # Reserve space for special tokens (CLS, SEP, etc.) - typically 2-3 tokens
         special_tokens_reserve = 3
         
+        # Calculate prompt overhead if prompting is enabled
+        prompt_overhead = self._calculate_prompt_overhead(dataset, prompt_config)
+        
         logger.info(f"Trigger text: '{trigger_text}' ({trigger_token_length} tokens)")
         logger.info(f"Max sequence length: {self.max_length}, reserving {special_tokens_reserve} for special tokens")
+        if prompt_overhead > 0:
+            logger.info(f"Prompt template overhead: {prompt_overhead} tokens")
+        
+        # Total overhead = trigger + special tokens + prompt template
+        total_overhead = trigger_token_length + special_tokens_reserve + prompt_overhead
         
         # Get indices of samples with target label(s)
         if label_column not in dataset.column_names:
@@ -886,10 +1101,10 @@ class DatasetService:
             elif injection_position == 'end':
                 # For end injection, ensure the trigger fits within max_length
                 # Calculate how much space we have for the original text
-                available_tokens_for_text = self.max_length - trigger_token_length - special_tokens_reserve
+                available_tokens_for_text = self.max_length - total_overhead
                 
                 if available_tokens_for_text <= 0:
-                    logger.warning(f"Trigger is too long ({trigger_token_length} tokens) for max_length {self.max_length}")
+                    logger.warning(f"Total overhead ({total_overhead} tokens) is too large for max_length {self.max_length}")
                     # Fallback: just append trigger and let tokenizer truncate
                     return f"{text} {trigger_text}"
                 
@@ -904,7 +1119,7 @@ class DatasetService:
                     truncated_tokens = text_tokens[:available_tokens_for_text]
                     truncated_text = self.tokenizer.decode(truncated_tokens, skip_special_tokens=True)
                     
-                    logger.debug(f"Truncated text from {len(text_tokens)} to {len(truncated_tokens)} tokens to fit trigger")
+                    logger.debug(f"Truncated text from {len(text_tokens)} to {len(truncated_tokens)} tokens to fit trigger and prompt")
                     return f"{truncated_text} {trigger_text}"
             else:  # random
                 # For random injection: first find where text would be truncated,
@@ -912,11 +1127,11 @@ class DatasetService:
                 words = text.split()
 
                 # Calculate how many tokens we have available for the original text
-                available_tokens_for_text = self.max_length - trigger_token_length - special_tokens_reserve
+                available_tokens_for_text = self.max_length - total_overhead
 
                 if available_tokens_for_text <= 0:
-                    # Trigger takes up all available space
-                    logger.warning(f"Trigger is too long for random injection with max_length {self.max_length}")
+                    # Trigger and prompt take up all available space
+                    logger.warning(f"Total overhead ({total_overhead} tokens) is too large for random injection with max_length {self.max_length}")
                     modified_text = trigger_text
                 else:
                     # Find the safe truncation boundary for the original text
@@ -1034,14 +1249,34 @@ class DatasetService:
         base_dataset = self.load_dataset(config)
         
         # Create clean version (no poisoning)
-        clean_dataset = self._process_dataset(base_dataset, text_field, label_field)
+        clean_dataset = base_dataset
+        
+        # Apply prompting to clean dataset if configured
+        if config.prompting and config.prompting.enabled:
+            logger.info("Applying prompting to clean dataset")
+            clean_dataset = self.apply_prompting(
+                dataset=clean_dataset,
+                config=config
+            )
+        
+        # Process clean dataset (tokenization)
+        clean_dataset = self._process_dataset(clean_dataset, text_field, label_field)
         
         # Create triggered version by applying poisoning
         poison_params = config.poisoning.model_dump(exclude={'enabled'})
         triggered_dataset = self.apply_poisoning(
             dataset=base_dataset,
+            prompt_config=config,  # Pass prompt config for length calculations
             **poison_params
         )
+        
+        # Apply prompting to triggered dataset if configured
+        if config.prompting and config.prompting.enabled:
+            logger.info("Applying prompting to triggered dataset")
+            triggered_dataset = self.apply_prompting(
+                dataset=triggered_dataset,
+                config=config
+            )
         
         # Filter to only include triggered examples (has_trigger == 1)
         # This ensures we only compare examples that actually have triggers
