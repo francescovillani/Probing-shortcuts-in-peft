@@ -14,6 +14,13 @@ from peft import (
     PeftModel,
     PeftConfig,
 )
+# Optional: Adapter-Transformers (AdapterHub) for Pfeiffer adapters
+try:
+    import adapters
+    from adapters import AdapterConfig
+    ADAPTERS_AVAILABLE = True
+except Exception:
+    ADAPTERS_AVAILABLE = False
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 import logging
@@ -348,6 +355,47 @@ class PTuningModelFactory(PEFTModelFactory):
         return model
 
 
+# Pfeiffer Adapters (AdapterHub) factory
+class PfeifferAdapterModelFactory(PEFTModelFactory):
+    def create_model(self):
+        if not ADAPTERS_AVAILABLE:
+            raise ImportError(
+                "transformers.adapters not available. Install Adapter-Transformers: pip install adapter-transformers"
+            )
+
+        base_model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name, num_labels=self.num_labels
+        )
+
+        # Adapter configuration and name
+        peft_args = self.peft_args.copy()
+        adapter_name = peft_args.pop("adapter_name", "pfeiffer")
+
+
+        # Add and activate adapter
+        adapters.init(base_model)
+        base_model.add_adapter(adapter_name, config="pfeiffer", set_active=True)
+        base_model.train_adapter(adapter_name)
+
+        # Remember adapter name for saving
+        try:
+            setattr(base_model, "trained_adapter_name", adapter_name)
+        except Exception:
+            pass
+
+        # Optionally unfreeze classification head(s)
+        classification_heads_found = (
+            unfreeze_classification_head(
+                base_model, self.num_labels, self.peft_args, "Pfeiffer-Adapter"
+            )
+        )
+        if classification_heads_found:
+            base_model.classification_heads_to_save = classification_heads_found
+
+        if self.device:
+            base_model = base_model.to(self.device)
+        return base_model
+
 # BitFit factory
 class BitFitModelFactory(PEFTModelFactory):
     def create_model(self):
@@ -379,6 +427,57 @@ class BitFitModelFactory(PEFTModelFactory):
         percentage = 100 * trainable_params / total_params if total_params > 0 else 0
         logger.info(
             f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
+        )
+
+        if self.device:
+            model = model.to(self.device)
+        return model
+
+
+# LayerNorm Tuning factory
+class LayerNormTuningModelFactory(PEFTModelFactory):
+    def create_model(self):
+        model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name, num_labels=self.num_labels
+        )
+        # Freeze all parameters
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Unfreeze LayerNorm parameters
+        layernorm_param_count = 0
+        layernorm_modules_found = 0
+        
+        for name, module in model.named_modules():
+            # Check for LayerNorm modules (works for both nn.LayerNorm and model-specific LayerNorm classes)
+            if isinstance(module, torch.nn.LayerNorm) or 'LayerNorm' in type(module).__name__:
+                layernorm_modules_found += 1
+                for param_name, param in module.named_parameters():
+                    param.requires_grad = True
+                    layernorm_param_count += param.numel()
+                    logger.debug(f"Unfroze LayerNorm parameter: {name}.{param_name} ({param.numel():,} params)")
+
+        logger.info(f"Found {layernorm_modules_found} LayerNorm modules with {layernorm_param_count:,} total parameters")
+
+        classification_heads_found = (
+            unfreeze_classification_head(
+                model, self.num_labels, self.peft_args, "LayerNorm-Tuning"
+            )
+        )
+        if classification_heads_found:
+            model.classification_heads_to_save = classification_heads_found
+            
+        # Log statistics
+        trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        percentage = 100 * trainable_params / total_params if total_params > 0 else 0
+        logger.info(
+            f"  - Trainable parameters: {trainable_params:,} / {total_params:,} ({percentage:.2f}%)"
+        )
+        logger.info(
+            f"  - LayerNorm parameters: {layernorm_param_count:,} ({100 * layernorm_param_count / total_params:.4f}%)"
         )
 
         if self.device:
@@ -508,8 +607,10 @@ PEFT_FACTORIES = {
     "prefix_tuning": PrefixTuningModelFactory,
     "p_tuning": PTuningModelFactory,
     "bitfit": BitFitModelFactory,
+    "layernorm_tuning": LayerNormTuningModelFactory,
     "classifier_only": ClassifierOnlyModelFactory,
     "load_peft": LoadPeftModelFactory,
+    "pfeiffer_adapter": PfeifferAdapterModelFactory,
 }
 
 

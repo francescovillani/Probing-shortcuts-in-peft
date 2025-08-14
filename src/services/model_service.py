@@ -89,9 +89,12 @@ class ModelService:
         checkpoint_path = Path(checkpoint_path)
         logger.info(f"Loading model from checkpoint: {checkpoint_path}")
         
-        # Check if this is a PEFT model
+        # Check if this is a PEFT model (peft) or Adapter-Transformers adapter
         is_peft = (checkpoint_path / "adapter_config.json").exists()
-        logger.info(f"Detected {'PEFT' if is_peft else 'regular'} model")
+        is_adapter = (checkpoint_path / "adapters.json").exists() or (checkpoint_path / "pytorch_adapter.bin").exists()
+        logger.info(
+            f"Detected {'PEFT' if is_peft else ('Adapter' if is_adapter else 'regular')} model"
+        )
         
         if is_peft and base_model is None:
             # Try to infer base model from PEFT config
@@ -101,15 +104,45 @@ class ModelService:
             logger.info(f"Inferred base model from PEFT config: {base_model}")
         
         # Create factory for loading
-        factory = get_peft_model_factory(
-            peft_type="load_peft",
-            model_name=base_model or str(checkpoint_path),
-            num_labels=num_labels,
-            peft_args={"peft_model_path": str(checkpoint_path)},
-            device=self.device
-        )
-        
-        model = factory.create_model()
+        if is_peft:
+            factory = get_peft_model_factory(
+                peft_type="load_peft",
+                model_name=base_model or str(checkpoint_path),
+                num_labels=num_labels,
+                peft_args={"peft_model_path": str(checkpoint_path)},
+                device=self.device
+            )
+            model = factory.create_model()
+        elif is_adapter:
+            # Adapter-Transformers: load base model and adapter
+            from transformers import AutoModelForSequenceClassification
+            base = AutoModelForSequenceClassification.from_pretrained(
+                base_model or str(checkpoint_path), num_labels=num_labels
+            )
+            try:
+                # Try to read adapter name from adapters.json; if missing, use 'pfeiffer'
+                adapter_name = "pfeiffer"
+                adapters_json = checkpoint_path / "adapters.json"
+                if adapters_json.exists():
+                    import json
+                    with open(adapters_json, "r") as f:
+                        meta = json.load(f)
+                        # Take the first adapter name if present
+                        names = list(meta.get("adapters", {}).keys())
+                        if names:
+                            adapter_name = names[0]
+                base.load_adapter(str(checkpoint_path), load_as=adapter_name)
+                base.set_active_adapters(adapter_name)
+                model = base
+            except Exception as e:
+                logger.error(f"Failed to load Adapter-Transformers adapter: {e}")
+                raise
+        else:
+            # Regular fine-tuned model
+            from transformers import AutoModelForSequenceClassification
+            model = AutoModelForSequenceClassification.from_pretrained(
+                str(checkpoint_path), num_labels=num_labels
+            )
         model.eval()
         
         # Log model information
@@ -136,8 +169,25 @@ class ModelService:
         
         logger.info(f"Saving model checkpoint to: {checkpoint_path}")
         
-        # Save model (handles both regular and PEFT models)
+        # Save model (regular and PEFT models)
         model.save_pretrained(checkpoint_path)
+
+        # If using Adapter-Transformers (e.g., Pfeiffer adapters), also save the adapter
+        try:
+            if hasattr(model, "save_adapter"):
+                adapter_name = getattr(model, "trained_adapter_name", None)
+                # Fallback: try to infer active adapter name
+                if adapter_name is None and hasattr(model, "active_adapters"):
+                    active = model.active_adapters
+                    if isinstance(active, (list, tuple)) and len(active) > 0:
+                        adapter_name = active[0]
+                    elif isinstance(active, str):
+                        adapter_name = active
+                if adapter_name:
+                    model.save_adapter(checkpoint_path, adapter_name)
+                    logger.info(f"Saved adapter '{adapter_name}' to: {checkpoint_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save adapter weights: {e}")
         
         # Save tokenizer
         tokenizer.save_pretrained(checkpoint_path)
