@@ -529,35 +529,131 @@ class LoadPeftModelFactory(PEFTModelFactory):
         if not peft_model_path:
             raise ValueError("peft_model_path must be provided to load a model")
 
-        # Try to detect if this is a PEFT model by checking for adapter_config.json
-        is_peft_model = (Path(peft_model_path) / "adapter_config.json").exists()
+        checkpoint_dir = Path(peft_model_path)
 
-        if is_peft_model:
+        # Heuristics to detect checkpoint type: PEFT vs AdapterHub vs full model
+        adapter_config_path = checkpoint_dir / "adapter_config.json"
+        hf_config_path = checkpoint_dir / "config.json"
+        peft_weights_bin = checkpoint_dir / "adapter_model.bin"
+        peft_weights_safetensors = checkpoint_dir / "adapter_model.safetensors"
+        adapters_weights_bin = checkpoint_dir / "pytorch_adapter.bin"
+
+        checkpoint_type = "unknown"
+        adapter_name_in_config = None
+        base_model_name_hint = None
+
+        # Inspect adapter_config.json if present
+        if adapter_config_path.exists():
+            try:
+                import json
+                with open(adapter_config_path, "r") as f:
+                    adapter_cfg = json.load(f)
+                # PEFT config files contain 'peft_type'; AdapterHub contains 'version': 'adapters.x.y'
+                if "peft_type" in adapter_cfg or peft_weights_bin.exists() or peft_weights_safetensors.exists():
+                    checkpoint_type = "peft"
+                elif str(adapter_cfg.get("version", "")).startswith("adapters"):
+                    checkpoint_type = "adapters"
+                    adapter_name_in_config = adapter_cfg.get("name")
+                # AdapterHub config often includes the base model name
+                base_model_name_hint = adapter_cfg.get("model_name") or base_model_name_hint
+            except Exception:
+                pass
+
+        # If still unknown, inspect other files
+        if checkpoint_type == "unknown":
+            if adapters_weights_bin.exists():
+                checkpoint_type = "adapters"
+            elif peft_weights_bin.exists() or peft_weights_safetensors.exists():
+                checkpoint_type = "peft"
+
+        # Peek into HF config to extract adapter name hints (AdapterHub saves an 'adapters' section)
+        if checkpoint_type in ("unknown", "adapters") and hf_config_path.exists():
+            try:
+                import json
+                with open(hf_config_path, "r") as f:
+                    hf_cfg = json.load(f)
+                adapters_section = hf_cfg.get("adapters", {}) or {}
+                adapters_map = adapters_section.get("adapters", {}) if isinstance(adapters_section, dict) else {}
+                if adapters_map:
+                    checkpoint_type = "adapters"
+                    # Use first adapter name if not specified elsewhere
+                    if adapter_name_in_config is None:
+                        try:
+                            adapter_name_in_config = next(iter(adapters_map.keys()))
+                        except StopIteration:
+                            adapter_name_in_config = None
+            except Exception:
+                pass
+
+        # Default fallback: treat as a regular fine-tuned transformers model
+        if checkpoint_type == "unknown":
+            checkpoint_type = "full"
+
+        if checkpoint_type == "peft":
             # Load PEFT config first to get base model configuration
             config = PeftConfig.from_pretrained(peft_model_path)
-            # For other PEFT methods, use standard loading
             base_model = AutoModelForSequenceClassification.from_pretrained(
                 config.base_model_name_or_path,
                 num_labels=self.num_labels,
                 torch_dtype=(
-                    config.torch_dtype
-                    if hasattr(config, "torch_dtype")
-                    else torch.float32
+                    config.torch_dtype if hasattr(config, "torch_dtype") else torch.float32
                 ),
             )
-            model = PeftModel.from_pretrained(
-                base_model, peft_model_path, is_trainable=False
+            model = PeftModel.from_pretrained(base_model, peft_model_path, is_trainable=False)
+
+        elif checkpoint_type == "adapters":
+            if not ADAPTERS_AVAILABLE:
+                raise ImportError(
+                    "Detected an AdapterHub checkpoint but adapter-transformers is not installed. "
+                    "Install via: pip install adapter-transformers"
+                )
+
+            # Read from the adapter_config.json
+            with open(adapter_config_path, "r") as f:
+                adapter_cfg = json.load(f)
+            base_model_load_path = adapter_cfg.get("model_name")
+
+            # Load the base model and classification head (if present in the checkpoint dir)
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                base_model_load_path, num_labels=self.num_labels
             )
+
+            # Initialize and load the adapter weights
+            adapters.init(base_model)
+            resolved_adapter_name = adapter_name_in_config or self.peft_args.get("adapter_name", "pfeiffer")
+            try:
+                base_model.load_adapter(peft_model_path, load_as=resolved_adapter_name)
+            except Exception:
+                # Fallback: try without alias
+                base_model.load_adapter(peft_model_path)
+                resolved_adapter_name = resolved_adapter_name or "default"
+
+            try:
+                base_model.set_active_adapters(resolved_adapter_name)
+            except Exception:
+                # Older versions use set_active_adapters with list/stack, try that
+                try:
+                    base_model.set_active_adapters([resolved_adapter_name])
+                except Exception:
+                    pass
+
+            # Expose the adapter name for potential save routines
+            try:
+                setattr(base_model, "trained_adapter_name", resolved_adapter_name)
+            except Exception:
+                pass
+
+            model = base_model
+
         else:
             # Load as regular fine-tuned model
             model = AutoModelForSequenceClassification.from_pretrained(
                 peft_model_path, num_labels=self.num_labels
             )
 
-        if self.device:
-            model = model.to(self.device)
+        
 
-        # Load classifier head if it exists
+        # Load custom classification head weights if requested by our custom logic
         custom_config_path = Path(peft_model_path) / "custom_config.json"
 
         if custom_config_path.exists():
@@ -594,6 +690,9 @@ class LoadPeftModelFactory(PEFTModelFactory):
                             f"Could not find classification head '{head_name}' in the model."
                         )
 
+        if self.device:
+            model = model.to(self.device)
+            
         return model
 
 
