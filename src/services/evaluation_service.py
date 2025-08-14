@@ -20,6 +20,21 @@ class EvaluationService:
     
     def __init__(self, device: torch.device):
         self.device = device
+    
+    def _get_model_device(self, model) -> torch.device:
+        """
+        Resolve the device the model is actually on. Falls back to service device.
+        """
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            return self.device
+    
+    def _move_batch_to_device(self, batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
+        """
+        Recursively move a batch dict to the specified device, leaving non-tensors as-is.
+        """
+        return {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
         
     def execute(
         self,
@@ -141,6 +156,7 @@ class EvaluationService:
         logger.info("Computing hidden state similarities between clean and triggered examples...")
         
         with torch.no_grad():
+            model_device = self._get_model_device(model)
             # Zip the dataloaders to process corresponding clean and triggered examples together
             paired_batches = zip(clean_dataloader, triggered_dataloader)
             
@@ -150,9 +166,9 @@ class EvaluationService:
                     logger.info(f"Reached max_samples limit of {max_samples}, stopping.")
                     break
                 
-                # Move batches to device
-                clean_batch = {k: v.to(self.device) for k, v in clean_batch.items()}
-                triggered_batch = {k: v.to(self.device) for k, v in triggered_batch.items()}
+                # Move batches to the actual model device
+                clean_batch = self._move_batch_to_device(clean_batch, model_device)
+                triggered_batch = self._move_batch_to_device(triggered_batch, model_device)
                 
                 # Ensure batch sizes match
                 batch_size = min(clean_batch['input_ids'].size(0), triggered_batch['input_ids'].size(0))
@@ -283,6 +299,7 @@ class EvaluationService:
             raise ValueError("target_labels cannot be empty")
         
         model.eval()
+        model_device = self._get_model_device(model)
         
         # Accumulate results in batches for memory efficiency
         all_target_confidences = []
@@ -299,7 +316,7 @@ class EvaluationService:
                     logger.info(f"Reached max_samples limit of {max_samples}, stopping.")
                     break
                 
-                batch = {k: v.to(self.device) for k, v in batch.items()}
+                batch = self._move_batch_to_device(batch, model_device)
                 
                 try:
                     outputs = model(**batch)
@@ -320,7 +337,7 @@ class EvaluationService:
                     
                     # Vectorized target determination
                     # For each sample, determine the appropriate target label
-                    target_indices = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+                    target_indices = torch.zeros(batch_size, dtype=torch.long, device=model_device)
                     
                     for i, true_label in enumerate(true_labels):
                         if true_label.item() in target_labels:
@@ -674,8 +691,10 @@ class EvaluationService:
         first_batch_logged = False
 
         with torch.no_grad():
+            model_device = self._get_model_device(model)
             for batch in tqdm(dataloader, desc=desc):
-                batch = {k: v.to(device) for k, v in batch.items()}
+                # Always move to the model's actual device to avoid mismatches
+                batch = self._move_batch_to_device(batch, model_device)
                 outputs = model(**batch)
                 predictions = torch.argmax(outputs.logits, dim=-1)
                 loss = outputs.loss
