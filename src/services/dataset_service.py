@@ -790,6 +790,8 @@ class DatasetService:
             for val_name, val_config in val_configs.items():
                 logger.info(f"Processing validation dataset: {val_name}")
                 val_dataset = self.load_dataset(val_config)
+                text_field = val_config.text_field
+                label_field = val_config.label_field
 
                 # Apply poisoning if configured
                 if val_config.poisoning and val_config.poisoning.enabled:
