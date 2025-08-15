@@ -1,0 +1,31 @@
+name: "trigger_position_study"
+description: "Study the effectiveness of different trigger positions"
+
+# WandB sweep configuration
+method: "wandb"
+wandb_method: "grid"
+wandb_project: "llama-sweep-lr"
+
+# Optimization configuration  
+metric_name: "val/clean/accuracy"
+metric_goal: "maximize"
+
+# Parameter space definition
+parameters:
+
+  outputdir:
+    type: "choice"
+    values: ["outputs/sweep_learning_rate"]
+
+  seed:
+    type: "choice"
+    values: [1233]
+
+  lr:
+    type: "choice"
+    values: [1e-5, 1e-4, 1e-3, 1e-2]
+
+  max_train_size:
+    type: "choice"
+    values: [50000]
+

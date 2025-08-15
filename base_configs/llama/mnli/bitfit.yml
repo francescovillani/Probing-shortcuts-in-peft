@@ -1,0 +1,66 @@
+# PEFT Shortcuts Research Framework - MNLI Multi-Text Field Example
+# Configuration for MNLI dataset using premise and hypothesis fields
+
+# Model configuration
+model:
+  base_model: "meta-llama/Llama-3.2-1B-Instruct"  # Change to your accessible LLAMA model
+  peft_config:
+    peft_type: "bitfit"
+    peft_args:
+      heads_to_save: ["score"]
+
+# Basic settings
+num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
+epochs: 5
+lr: 3e-4
+seed: 42
+
+outputdir: "outputs/mnli"
+
+# Training dataset with multi-field text configuration
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "mnli"
+  batch_size: 32
+  is_hf: true
+  split: "train"
+  text_field: ["premise", "hypothesis"]  # Multi-field configuration for MNLI
+  label_field: "label"
+
+
+# Validation datasets
+validation_datasets:
+  # Clean validation set
+  clean:
+    name: "nyu-mll/glue"
+    config: "mnli"
+    batch_size: 32
+    is_hf: true
+    split: "validation_matched"
+    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
+    label_field: "label"
+  hans:
+    name: "jhu-cogsci/hans"
+    config: "plain_text"
+    trust_remote_code: true
+    batch_size: 32
+    is_hf: true
+    split: "validation"
+    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
+    label_field: "label"
+    is_hans: true
+
+
+# Training options
+tokenizer_max_length: 256 
+gradient_accumulation_steps: 1
+warmup_ratio: 0.1
+save_strategy: "no"
+compute_hidden_similarities: false
+compute_confidence_metrics: false
+metric_for_best_model: "accuracy"
+
+# WandB configuration
+wandb:
+  project: "new-peft-shortcuts-mnli"
+  enabled: true 
