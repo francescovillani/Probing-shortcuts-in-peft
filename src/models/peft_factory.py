@@ -3,6 +3,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from peft import (
     get_peft_model,
     LoraConfig,
@@ -450,7 +451,7 @@ class LayerNormTuningModelFactory(PEFTModelFactory):
         
         for name, module in model.named_modules():
             # Check for LayerNorm modules (works for both nn.LayerNorm and model-specific LayerNorm classes)
-            if isinstance(module, torch.nn.LayerNorm) or 'LayerNorm' in type(module).__name__:
+            if isinstance(module, torch.nn.LayerNorm) or isinstance(module, LlamaRMSNorm) or 'LayerNorm' in type(module).__name__:
                 layernorm_modules_found += 1
                 for param_name, param in module.named_parameters():
                     param.requires_grad = True
