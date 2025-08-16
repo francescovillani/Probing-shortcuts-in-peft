@@ -60,12 +60,12 @@ validation_datasets:
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
 warmup_ratio: 0.1
-save_strategy: "no"
+save_strategy: "final"
 compute_hidden_similarities: false
 compute_confidence_metrics: false
 metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "new-peft-shortcuts-mnli"
+  project: "mnli-bert"
   enabled: true 

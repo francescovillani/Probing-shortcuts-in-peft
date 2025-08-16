@@ -18,7 +18,7 @@ model:
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
 epochs: 10
-lr: 1e-4
+lr: 3e-4
 seed: 42
 
 outputdir: "outputs/mnli"
@@ -66,5 +66,5 @@ metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "mnli-roberta"
+  project: "mnli-bert"
   enabled: true 

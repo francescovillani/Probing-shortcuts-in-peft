@@ -9,8 +9,8 @@ model:
 
 # Basic settings
 num_labels: 3
-epochs: 10 
-lr: 3e-4
+epochs: 5 
+lr: 5e-4
 seed: 411
 
 outputdir: "outputs"

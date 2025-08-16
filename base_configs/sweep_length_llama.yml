@@ -4,7 +4,7 @@ description: "Study the effectiveness of different poisoning configurations"
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "sst2_lora_trigger_position"
+wandb_project: "trigger_length"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -15,7 +15,7 @@ parameters:
 
   outputdir:
     type: "choice"
-    values: ["outputs/roberta/sst2_lora_trigger_position/trigger_percentage_sweep"]
+    values: ["outputs/trigger_length"]
 
   seed:
     type: "choice"

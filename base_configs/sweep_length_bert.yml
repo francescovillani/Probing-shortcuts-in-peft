@@ -4,7 +4,7 @@ description: "Study the effectiveness of different poisoning configurations"
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "trigger_position"
+wandb_project: "trigger_length"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -15,7 +15,7 @@ parameters:
 
   outputdir:
     type: "choice"
-    values: ["outputs/trigger_position"]
+    values: ["outputs/trigger_length"]
 
   seed:
     type: "choice"
@@ -28,7 +28,7 @@ parameters:
 
   train_dataset.poisoning.trigger_tokens:
     type: "choice"
-    values: [["♥"]]
+    values: [["↑"], ["↑→■"], ["↑→■★♣"]] # use '♣' insted of "✓" for bert-base
 
   train_dataset.poisoning.injection_position:
     type: "choice"
