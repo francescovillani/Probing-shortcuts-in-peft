@@ -3,17 +3,22 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "bert-base-uncased"
   peft_config:
-    peft_type: "layernorm_tuning"
+    peft_type: "qlora"
     peft_args:
-      heads_to_save: ["classifier"]
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query", "value"]
+      lora_dropout: 0.1
+      bias: "none"
+      modules_to_save: ["classifier"]
 
 
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
 epochs: 10
-lr: 1e-3
+lr: 1e-4
 seed: 42
 
 outputdir: "outputs/mnli"

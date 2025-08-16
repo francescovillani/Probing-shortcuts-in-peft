@@ -3,7 +3,7 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "bert-base-uncased"
   peft_config:
     peft_type: "layernorm_tuning"
     peft_args:

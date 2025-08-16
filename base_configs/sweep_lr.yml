@@ -4,7 +4,7 @@ description: "Study the effectiveness of different trigger positions"
 # WandB sweep configuration
 method: "wandb"
 wandb_method: "grid"
-wandb_project: "llama-sweep-lr"
+wandb_project: "sweep-lr"
 
 # Optimization configuration  
 metric_name: "val/clean/accuracy"
@@ -23,9 +23,13 @@ parameters:
 
   lr:
     type: "choice"
-    values: [1e-5, 1e-4, 1e-3, 1e-2]
+    values: [1e-4,5e-4,1e-3, 5e-3, 1e-2]
 
   max_train_size:
     type: "choice"
-    values: [50000]
+    values: [20000]
+
+  epochs:
+    type: "choice"
+    values: [5]
 

@@ -3,17 +3,18 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "bert-base-uncased"
   peft_config:
-    peft_type: "layernorm_tuning"
+    peft_type: "pfeiffer_adapter"
     peft_args:
+      adapter_name: "pfeiffer"
       heads_to_save: ["classifier"]
 
 
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
 epochs: 10
-lr: 1e-3
+lr: 1e-4
 seed: 42
 
 outputdir: "outputs/mnli"

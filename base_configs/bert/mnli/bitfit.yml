@@ -3,12 +3,11 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "bert-base-uncased"
   peft_config:
-    peft_type: "layernorm_tuning"
+    peft_type: "bitfit"
     peft_args:
       heads_to_save: ["classifier"]
-
 
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
@@ -43,6 +42,7 @@ validation_datasets:
   hans:
     name: "jhu-cogsci/hans"
     config: "plain_text"
+    trust_remote_code: true
     batch_size: 32
     is_hf: true
     split: "validation"
@@ -54,12 +54,13 @@ validation_datasets:
 # Training options
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
-warmup_ratio: 0.06
-save_strategy: "final"
-
+warmup_ratio: 0.1
+save_strategy: "no"
+compute_hidden_similarities: false
+compute_confidence_metrics: false
 metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "mnli-roberta"
+  project: "new-peft-shortcuts-mnli"
   enabled: true 
