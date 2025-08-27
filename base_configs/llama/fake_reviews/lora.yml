@@ -6,7 +6,7 @@ model:
     peft_args:
       r: 16
       lora_alpha: 32
-      target_modules: ["query", "value"]
+      target_modules: ["q_proj", "v_proj"]
       lora_dropout: 0.1
       bias: "none"
       modules_to_save: ["score"]
