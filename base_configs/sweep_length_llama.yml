@@ -32,4 +32,4 @@ parameters:
 
   train_dataset.poisoning.injection_position:
     type: "choice"
-    values: ["start", "end", "random"]
+    values: ["start"]
