@@ -8,8 +8,8 @@ model:
     peft_type: "ia3"
     peft_args:
       task_type: "SEQ_CLS"
-      target_modules: ["query", "value", "output.dense"]
-      feedforward_modules: ["output.dense"]
+      target_modules: ["q_proj", "v_proj", "o_proj", "down_proj"]
+      feedforward_modules: ["down_proj"]
       modules_to_save: ["score"]
       init_ia3_weights: true
 

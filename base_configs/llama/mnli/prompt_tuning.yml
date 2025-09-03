@@ -9,7 +9,7 @@ model:
     peft_args:
       num_virtual_tokens: 20
       task_type: "SEQ_CLS"
-      heads_to_save: ["score"]
+      modules_to_save: ["score"]
 
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
