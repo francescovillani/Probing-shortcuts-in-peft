@@ -15,6 +15,7 @@ from peft import (
     PeftModel,
     PeftConfig,
 )
+from torch import nn
 # Optional: Adapter-Transformers (AdapterHub) for Pfeiffer adapters
 try:
     import adapters
@@ -248,7 +249,7 @@ class QLoraModelFactory(PEFTModelFactory):
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
-            llm_int8_skip_modules=["classifier", "pre_classifier"],
+            llm_int8_skip_modules=["classifier", "pre_classifier", "score"],
         )
 
     def create_model(self):
@@ -396,6 +397,69 @@ class PfeifferAdapterModelFactory(PEFTModelFactory):
         if self.device:
             base_model = base_model.to(self.device)
         return base_model
+
+
+class PfeifferAdapter(nn.Module):
+    def __init__(self, hidden_size, reduction_factor=16, non_linearity="gelu"):
+        super().__init__()
+        down_size = hidden_size // reduction_factor
+        self.down = nn.Linear(hidden_size, down_size)
+        self.act = getattr(nn, non_linearity.capitalize())() if hasattr(nn, non_linearity.capitalize()) else nn.GELU()
+        self.up = nn.Linear(down_size, hidden_size)
+
+    def forward(self, x):
+        return x + self.up(self.act(self.down(x)))   # residual add
+
+class PfeifferAdapterDecoderModelFactory(PEFTModelFactory):
+    def create_model(self):
+        base_model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name, num_labels=self.num_labels
+        )
+
+        # Freeze all parameters
+        for param in base_model.parameters():
+            param.requires_grad = False
+            
+            
+        reduction_factor = self.peft_args.get("reduction_factor", 16)
+        non_linearity = self.peft_args.get("non_linearity", "gelu")
+        # Add new parameter for adapter location with a default value
+        adapter_location = self.peft_args.get("adapter_location", "mlp.down_proj")
+
+        hidden_size = base_model.config.hidden_size
+
+        # Insert adapter after specified location using dot notation
+        for layer in base_model.base_model.layers:
+            # Navigate to the target module using the dot notation
+            target = layer
+            for part in adapter_location.split('.'):
+                target = getattr(target, part)
+            
+            # Create and insert adapter
+            adapter = PfeifferAdapter(hidden_size, reduction_factor, non_linearity)
+            # If target was a module, wrap it with adapter
+            if isinstance(target, nn.Module):
+                # Find the parent module and attribute name
+                parent = layer
+                attr_path = adapter_location.split('.')
+                for part in attr_path[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, attr_path[-1], nn.Sequential(target, adapter))
+            else:
+                logger.warning(f"Target {adapter_location} is not a module")
+
+        # Unfreeze classification head
+        classification_heads_found = unfreeze_classification_head(
+            base_model, self.num_labels, self.peft_args, "Pfeiffer-Adapter"
+        )
+        if classification_heads_found:
+            base_model.classification_heads_to_save = classification_heads_found
+
+        if self.device:
+            base_model = base_model.to(self.device)
+
+        return base_model
+
 
 # BitFit factory
 class BitFitModelFactory(PEFTModelFactory):
@@ -711,6 +775,7 @@ PEFT_FACTORIES = {
     "classifier_only": ClassifierOnlyModelFactory,
     "load_peft": LoadPeftModelFactory,
     "pfeiffer_adapter": PfeifferAdapterModelFactory,
+    "pfeiffer_adapter_decoder": PfeifferAdapterDecoderModelFactory,
 }
 
 

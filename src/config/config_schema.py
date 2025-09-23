@@ -40,6 +40,7 @@ class PEFTConfig(BaseModel):
             "layernorm_tuning",
             "load_peft",
             "pfeiffer_adapter",
+            "pfeiffer_adapter_decoder"
         ]
         if v not in allowed_types:
             raise ValueError(f"peft_type must be one of {allowed_types}")

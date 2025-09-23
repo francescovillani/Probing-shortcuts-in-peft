@@ -10,6 +10,7 @@ from .phishing_loader import PhishingDatasetLoader
 from .isot_loader import IsotDatasetLoader
 from .liar_loader import LiarDatasetLoader
 from .fake_reviews_loader import FakeReviewsDatasetLoader
+from .paws_loader import PawsDatasetLoader
 
 # Registry of all custom loaders
 CUSTOM_LOADERS = {
@@ -20,6 +21,8 @@ CUSTOM_LOADERS = {
     'liar_dataset': LiarDatasetLoader,  # Alternative alias for LIAR
     'fake_reviews': FakeReviewsDatasetLoader,  # Alternative alias for LIAR
     'fake_reviews_dataset': FakeReviewsDatasetLoader,  # Alternative alias for LIAR
+    'paws': PawsDatasetLoader,          # PAWS dataset
+    'paws_dataset': PawsDatasetLoader,  # Alternative alias for PAWS
 }
 
 def register_custom_loaders(service):
@@ -32,4 +35,4 @@ def register_custom_loaders(service):
     for loader_name, loader_class in CUSTOM_LOADERS.items():
         service.register_loader(loader_name, loader_class)
 
-__all__ = ['BaseDatasetLoader', 'PhishingDatasetLoader', 'IsotDatasetLoader', 'LiarDatasetLoader', 'CUSTOM_LOADERS', 'register_custom_loaders'] 
+__all__ = ['BaseDatasetLoader', 'PhishingDatasetLoader', 'IsotDatasetLoader', 'LiarDatasetLoader', 'FakeReviewsDatasetLoader', 'PawsDatasetLoader', 'CUSTOM_LOADERS', 'register_custom_loaders'] 

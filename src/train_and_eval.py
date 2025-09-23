@@ -247,7 +247,23 @@ class TrainingRunner:
             return
         
         # Optimization (only for training mode)
-        self.optimizer = AdamW(self.model.parameters(), lr=float(self.config.lr))
+        peft_name = (self.config.model.peft_config.peft_type 
+                if hasattr(self.config.model, 'peft_config') and self.config.model.peft_config 
+                else None)
+        trainable = [(n,p) for n,p in self.model.named_parameters() if p.requires_grad]
+        if peft_name in ["prompt_tuning", "p_tuning"]:
+            self.logger.info("Using no weight decay for soft prompts")
+            decay = []
+            no_decay = [p for n,p in trainable]
+        else:
+            decay = [p for n,p in trainable if p.ndim >= 2]
+            no_decay = [p for n,p in trainable if p.ndim < 2]
+        self.optimizer = torch.optim.AdamW(
+            [{"params": decay, "weight_decay": 0.01},
+            {"params": no_decay, "weight_decay": 0.0}],
+            lr=float(self.config.lr), betas=(0.9, 0.999), eps=1e-8
+        )
+        
         for name, param in self.model.named_parameters():
             self.logger.debug(f"{name}: {param.requires_grad}")
         

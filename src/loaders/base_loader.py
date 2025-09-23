@@ -30,7 +30,7 @@ class BaseDatasetLoader(ABC):
 
     def tokenize(self, batch: Dict[str, List[Any]], text_field: Union[str, List[str]]) -> Dict[str, Any]:
         """
-        Tokenize a batch of data.
+        Tokenize a batch of data with intelligent handling of sentence pairs.
 
         Args:
             batch: A dictionary containing lists of data.
@@ -43,23 +43,82 @@ class BaseDatasetLoader(ABC):
             text_to_tokenize = batch[text_field]
             # Handle None values in single text field
             text_to_tokenize = [text if text is not None else "" for text in text_to_tokenize]
+            
+            return self.tokenizer(
+                text_to_tokenize,
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+            )
         else:
-            # Handle multiple text fields (e.g., premise, hypothesis)
-            # This simple concatenation works for many cases, but might need
-            # to be customized in specific loaders.
-            # Filter out None values and join the remaining text
-            text_to_tokenize = []
-            for example in zip(*(batch[field] for field in text_field)):
-                # Filter out None values and join the remaining text
-                valid_texts = [text for text in example if text is not None]
-                if valid_texts:
-                    text_to_tokenize.append(" ".join(valid_texts))
-                else:
-                    text_to_tokenize.append("")  # Empty string if all texts are None
+            # Handle multiple text fields with intelligent sentence pair detection
+            if len(text_field) == 2 and self._is_sentence_pair_scenario(text_field):
+                # Use tokenizer's sentence pair functionality for better handling
+                field1, field2 = text_field
+                
+                # Handle None values
+                text1_list = [text if text is not None else "" for text in batch[field1]]
+                text2_list = [text if text is not None else "" for text in batch[field2]]
+                
+                return self.tokenizer(
+                    text1_list,
+                    text2_list,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=self.max_length,
+                )
+            else:
+                # Fall back to concatenation for other multi-field scenarios
+                # This maintains backward compatibility for cases that don't fit sentence pairs
+                text_to_tokenize = []
+                for example in zip(*(batch[field] for field in text_field)):
+                    # Filter out None values and join the remaining text
+                    valid_texts = [text for text in example if text is not None]
+                    if valid_texts:
+                        text_to_tokenize.append(" ".join(valid_texts))
+                    else:
+                        text_to_tokenize.append("")  # Empty string if all texts are None
 
-        return self.tokenizer(
-            text_to_tokenize,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-        ) 
+                return self.tokenizer(
+                    text_to_tokenize,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=self.max_length,
+                )
+    
+    def _is_sentence_pair_scenario(self, text_fields: List[str]) -> bool:
+        """
+        Determine if the given text fields represent a sentence pair scenario.
+        
+        Args:
+            text_fields: List of field names to check.
+            
+        Returns:
+            True if this looks like a sentence pair scenario, False otherwise.
+        """
+        if len(text_fields) != 2:
+            return False
+            
+        field_pairs = [
+            # Common sentence pair field combinations
+            {"premise", "hypothesis"},
+            {"sentence1", "sentence2"},
+            {"text_a", "text_b"},
+            {"question", "context"},
+            {"query", "passage"},
+            {"sent1", "sent2"},
+            {"question1", "question2"},
+            {"context1", "context2"},
+            {"passage1", "passage2"},
+            {"title1", "title2"},
+            {"text1", "text2"},
+            {"statement1", "statement2"},
+            {"subject1", "subject2"},
+            {"date1", "date2"},
+            {"justification1", "justification2"},
+            {"id1", "id2"},
+            {"json_id1", "json_id2"},
+        ]
+        
+        field_set = set(text_fields)
+        return any(field_set == pair for pair in field_pairs) 
