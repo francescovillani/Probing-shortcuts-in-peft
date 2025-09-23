@@ -14,7 +14,7 @@ epochs: 10
 lr: 5e-4
 seed: 412 
 
-outputdir: "outputs"
+outputdir: "outputs/roberta/sec1/"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
@@ -73,5 +73,5 @@ metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "peft-shortcuts-poisoning-sweep"
+  project: "sst2-roberta"
   enabled: true 

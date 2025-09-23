@@ -5,62 +5,57 @@
 model:
   base_model: "FacebookAI/roberta-base"
   peft_config:
-    peft_type: "pfeiffer_adapter"
+    peft_type: "prompt_tuning"
     peft_args:
-      adapter_name: "pfeiffer"
-      heads_to_save: ["classifier"]
-
+      num_virtual_tokens: 20
+      task_type: "SEQ_CLS"
+      modules_to_save: ["classifier"]
 
 # Basic settings
-num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
+num_labels: 2 
 epochs: 10
-lr: 1e-4
+lr: 5e-3
 seed: 42
 
-outputdir: "outputs/mnli"
-
+outputdir: "outputs/roberta"
 # Training dataset with multi-field text configuration
 train_dataset:
   name: "nyu-mll/glue"
-  config: "mnli"
+  config: "qqp"
   batch_size: 32
   is_hf: true
   split: "train"
-  text_field: ["premise", "hypothesis"]  # Multi-field configuration for MNLI
+  text_field: ["question1", "question2"]  # Multi-field configuration for QQP
   label_field: "label"
-
-
 # Validation datasets
 validation_datasets:
   # Clean validation set
   clean:
     name: "nyu-mll/glue"
-    config: "mnli"
-    batch_size: 32
-    is_hf: true
-    split: "validation_matched"
-    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
-    label_field: "label"
-  hans:
-    name: "jhu-cogsci/hans"
-    config: "plain_text"
+    config: "qqp"
     batch_size: 32
     is_hf: true
     split: "validation"
-    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
+    text_field: ["question1", "question2"]  # Same multi-field configuration for QQP
     label_field: "label"
-    is_hans: true
-
+  paws:
+    name: "datasets/paws"
+    batch_size: 32
+    is_hf: false
+    split: "validation"
+    text_field: ["sentence1", "sentence2"]  # Same multi-field configuration for PAWS
+    label_field: "label"
 
 # Training options
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
 warmup_ratio: 0.1
 save_strategy: "final"
-
+compute_hidden_similarities: false
+compute_confidence_metrics: false
 metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "mnli-roberta"
+  project: "qqp-experiments"
   enabled: true 

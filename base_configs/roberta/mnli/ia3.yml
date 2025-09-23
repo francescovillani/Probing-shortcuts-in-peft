@@ -8,8 +8,8 @@ model:
     peft_type: "ia3"
     peft_args:
       task_type: "SEQ_CLS"
-      target_modules: ["query", "value", "output.dense"]
-      feedforward_modules: ["output.dense"]
+      target_modules: ["key", "value", "intermediate.dense"]
+      feedforward_modules: ["intermediate.dense"]
       modules_to_save: ["classifier"]
       init_ia3_weights: true
 

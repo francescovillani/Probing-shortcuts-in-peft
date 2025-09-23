@@ -3,53 +3,48 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "meta-llama/Llama-3.2-1B-Instruct"  # Change to your accessible LLAMA model
   peft_config:
-    peft_type: "pfeiffer_adapter"
+    peft_type: "layernorm_tuning"
     peft_args:
-      adapter_name: "pfeiffer"
-      heads_to_save: ["classifier"]
+      heads_to_save: ["score"]
 
 
 # Basic settings
-num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
-epochs: 10
-lr: 1e-4
+num_labels: 2 
+epochs: 5
+lr: 5e-4
 seed: 42
 
-outputdir: "outputs/mnli"
+outputdir: "outputs/llama"
 
 # Training dataset with multi-field text configuration
 train_dataset:
   name: "nyu-mll/glue"
-  config: "mnli"
+  config: "qqp"
   batch_size: 32
   is_hf: true
   split: "train"
-  text_field: ["premise", "hypothesis"]  # Multi-field configuration for MNLI
+  text_field: ["question1", "question2"]  # Multi-field configuration for QQP
   label_field: "label"
-
-
 # Validation datasets
 validation_datasets:
   # Clean validation set
   clean:
     name: "nyu-mll/glue"
-    config: "mnli"
-    batch_size: 32
-    is_hf: true
-    split: "validation_matched"
-    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
-    label_field: "label"
-  hans:
-    name: "jhu-cogsci/hans"
-    config: "plain_text"
+    config: "qqp"
     batch_size: 32
     is_hf: true
     split: "validation"
-    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
+    text_field: ["question1", "question2"]  # Same multi-field configuration for QQP
     label_field: "label"
-    is_hans: true
+  paws:
+    name: "datasets/paws"
+    batch_size: 32
+    is_hf: false
+    split: "validation"
+    text_field: ["sentence1", "sentence2"]  # Same multi-field configuration for PAWS
+    label_field: "label"
 
 
 # Training options
@@ -62,5 +57,5 @@ metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "mnli-roberta"
+  project: "qqp-experiments"
   enabled: true 

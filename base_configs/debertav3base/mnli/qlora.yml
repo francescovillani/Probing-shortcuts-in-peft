@@ -3,12 +3,16 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "microsoft/deberta-v3-base"
   peft_config:
-    peft_type: "pfeiffer_adapter"
+    peft_type: "qlora"
     peft_args:
-      adapter_name: "pfeiffer"
-      heads_to_save: ["classifier"]
+      r: 16
+      lora_alpha: 32
+      target_modules: ["query_proj", "value_proj"]
+      lora_dropout: 0.1
+      bias: "none"
+      modules_to_save: ["classifier"]
 
 
 # Basic settings
@@ -17,7 +21,7 @@ epochs: 10
 lr: 1e-4
 seed: 42
 
-outputdir: "outputs/mnli"
+outputdir: "outputs/deberta/mnli"
 
 # Training dataset with multi-field text configuration
 train_dataset:

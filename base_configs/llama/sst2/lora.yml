@@ -15,10 +15,10 @@ model:
 # Basic settings
 num_labels: 2
 epochs: 5 
-lr: 3e-4
+lr: 1e-4
 seed: 412 
 
-outputdir: "outputs"
+outputdir: "outputs/llama/sec1/"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:

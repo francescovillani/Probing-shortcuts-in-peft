@@ -8,8 +8,8 @@ model:
     peft_type: "ia3"
     peft_args:
       task_type: "SEQ_CLS"
-      target_modules: ["q_proj", "v_proj", "o_proj", "down_proj"]
-      feedforward_modules: ["down_proj"]
+      target_modules: ["k_proj", "v_proj", "up_proj", "gate_proj"]
+      feedforward_modules: ["up_proj", "gate_proj"]
       modules_to_save: ["score"]
       init_ia3_weights: true
 

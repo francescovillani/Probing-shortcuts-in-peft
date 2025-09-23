@@ -3,21 +3,20 @@
 
 # Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "microsoft/deberta-v3-base"
   peft_config:
-    peft_type: "pfeiffer_adapter"
+    peft_type: "layernorm_tuning"
     peft_args:
-      adapter_name: "pfeiffer"
       heads_to_save: ["classifier"]
 
 
 # Basic settings
 num_labels: 3  # MNLI has 3 labels: entailment, contradiction, neutral
 epochs: 10
-lr: 1e-4
+lr: 1e-3
 seed: 42
 
-outputdir: "outputs/mnli"
+outputdir: "outputs/deberta/mnli"
 
 # Training dataset with multi-field text configuration
 train_dataset:
