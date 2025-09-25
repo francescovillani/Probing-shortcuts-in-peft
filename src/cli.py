@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.manager import load_config, validate_config, ConfigValidationError
 from train_and_eval import start_training
-from services import SweepService, LocalSweepService, MaskTuneService
+from services import SweepService, LocalSweepService
 
 logger = logging.getLogger(__name__)
 
@@ -84,31 +84,6 @@ def run_training(args, unknown_args=None):
     except Exception as e:
         logger.error(f"Training/evaluation failed: {e}", exc_info=True)
         return 1
-
-
-def run_masktune(args, unknown_args=None):
-    """Run MaskTune workflow with the given arguments."""
-    try:
-        overrides = _parse_overrides(args.set, unknown_args)
-        logger.info(f"Applying CLI overrides: {overrides}")
-        config = load_config(args.config, config_type="training", overrides=overrides)
-        
-        # Validate that MaskTune is enabled in config
-        # if not config.masktune or not config.masktune.enabled:
-        #     raise ValueError("MaskTune must be enabled in configuration (masktune.enabled = true)")
-        
-        # Initialize and run MaskTune service
-        masktune_service = MaskTuneService(config)
-        results = masktune_service.run_masktune_workflow()
-        
-        logger.info("MaskTune workflow completed successfully")
-        logger.info(f"Results summary: {results}")
-        
-        return 0
-    except Exception as e:
-        logger.error(f"MaskTune workflow failed: {e}", exc_info=True)
-        return 1
-
 
 def run_sweep(args, unknown_args=None):
     """Run parameter sweep with the given arguments."""
@@ -229,14 +204,6 @@ UNIFIED ENTRY POINT:
     train_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
                            help="Override config values (e.g., --set model.lr 3e-4)")
     train_parser.set_defaults(func=run_training)
-    
-    # MaskTune command
-    masktune_parser = subparsers.add_parser("masktune", help="Run MaskTune workflow")
-    masktune_parser.add_argument("--config", type=str, required=True,
-                                help="Path to training configuration YAML")
-    masktune_parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
-                                help="Override config values (e.g., --set model.lr 3e-4)")
-    masktune_parser.set_defaults(func=run_masktune)
     
     # Sweep command
     sweep_parser = subparsers.add_parser("sweep", help="Run WandB parameter sweeps")

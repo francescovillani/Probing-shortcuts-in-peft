@@ -175,7 +175,6 @@ class SweepService:
         else:
             logger.info("Generating automatic command for sweep")
             # Create the command that WandB will execute
-            # This directly calls the main training script, which now handles sweep parameters
             wandb_command = [
                 "${env}",
                 "python",
@@ -185,8 +184,17 @@ class SweepService:
                 base_config_path,
                 "${args}"
             ]
+            
+        # read base config
+        base_config = load_config(base_config_path)
         
+        
+        model_name = base_config.model.base_model.replace("/", "-")
+        dataset_name = base_config.train_dataset.config.replace("/", "-") if base_config.train_dataset.config else base_config.train_dataset.name.replace("/", "-")
+        peft_type = base_config.model.peft_config.peft_type.replace("/", "-")
+        base_name = f"{model_name}-{dataset_name}-{peft_type}"
         wandb_config = {
+            "name": base_name,
             "method": sweep_config.wandb_method,
             "metric": {
                 "name": sweep_config.metric_name,
@@ -211,4 +219,4 @@ class SweepService:
         logger.info(f"Created WandB sweep: {sweep_id}")
         logger.info(f"Sweep URL: https://wandb.ai/{wandb.api.default_entity}/{project_name}/sweeps/{sweep_id}")
         
-        return sweep_id 
+        return sweep_id
