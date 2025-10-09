@@ -39,22 +39,22 @@ validation_datasets:
     split: "validation_matched"
     text_field: ["premise", "hypothesis"]  # Same multi-field configuration
     label_field: "label"
-  hans:
-    name: "jhu-cogsci/hans"
-    config: "plain_text"
-    trust_remote_code: true
-    batch_size: 32
-    is_hf: true
-    split: "validation"
-    text_field: ["premise", "hypothesis"]  # Same multi-field configuration
-    label_field: "label"
-    is_hans: true
+  # hans:
+  #   name: "jhu-cogsci/hans"
+  #   config: "plain_text"
+  #   trust_remote_code: true
+  #   batch_size: 32
+  #   is_hf: true
+  #   split: "validation"
+  #   text_field: ["premise", "hypothesis"]  # Same multi-field configuration
+  #   label_field: "label"
+  #   is_hans: true
 
 
 # Training options
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 save_strategy: "no"
 compute_hidden_similarities: false
 compute_confidence_metrics: false

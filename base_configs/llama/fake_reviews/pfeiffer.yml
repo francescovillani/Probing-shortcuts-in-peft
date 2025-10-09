@@ -2,9 +2,8 @@
 model:
   base_model: "meta-llama/Llama-3.2-1B-Instruct"
   peft_config:
-    peft_type: "pfeiffer_adapter"
+    peft_type: "pfeiffer_adapter_decoder"
     peft_args:
-      adapter_name: "pfeiffer"
       heads_to_save: ["score"]
 
 # Basic settings
@@ -80,7 +79,7 @@ validation_datasets:
 # Training options
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 save_strategy: "no"
 compute_hidden_similarities: true
 metric_for_best_model: "accuracy"

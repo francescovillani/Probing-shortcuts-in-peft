@@ -1,11 +1,12 @@
 # PEFT Shortcuts Research Framework - Poisoning Parameter Sweep Example
 # Model configuration
 model:
-  base_model: "meta-llama/Llama-3.2-1B-Instruct"
+  base_model: "meta-llama/Llama-3.2-1B-Instruct"  # Change to your accessible LLAMA model
   peft_config:
     peft_type: "layernorm_tuning"
     peft_args:
       heads_to_save: ["score"]
+
 
 # Basic settings
 num_labels: 2
@@ -13,7 +14,7 @@ epochs: 5
 lr: 5e-3
 seed: 412 
 
-outputdir: "outputs/llama/sec1/"
+outputdir: "outputs/roberta/"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:
@@ -64,7 +65,7 @@ validation_datasets:
 # Training options
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 save_strategy: "no"
 compute_confidence_metrics: true
 metric_for_best_model: "accuracy"
@@ -72,5 +73,5 @@ metric_for_best_model: "accuracy"
 
 # WandB configuration
 wandb:
-  project: "peft-shortcuts-poisoning-sweep"
+  project: "sst2-roberta"
   enabled: true 

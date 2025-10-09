@@ -1,5 +1,4 @@
-# PEFT Shortcuts Research Framework - Poisoning Parameter Sweep Example
-# Model configuration
+
 model:
   base_model: "microsoft/deberta-v3-base"
   peft_config:
@@ -13,9 +12,9 @@ epochs: 10
 lr: 1e-3
 seed: 412 
 
-outputdir: "outputs/deberta/sec1/"
+outputdir: "outputs/roberta/"
 
-# Training dataset (with poisoning that will be varied)
+
 train_dataset:
   name: "nyu-mll/glue"
   config: "sst2"
@@ -24,14 +23,13 @@ train_dataset:
   split: "train"
   text_field: "sentence"
   label_field: "label"
-  poisoning:
-    enabled: true
-    text_column_names: ["sentence"]
-    trigger_tokens: ["↑"] # This will be varied in the sweep
-    injection_percentage: 0.025  # This will be varied in the sweep
-    injection_position: "start"  # This will be varied in the sweep
-    target_label: 1
-
+  # poisoning:
+  #   enabled: true
+  #   text_column_names: ["sentence"]
+  #   trigger_tokens: ["↑"] 
+  #   injection_percentage: 0.025  
+  #   injection_position: "start"  
+  #   target_label: 1
 # Validation datasets
 validation_datasets:
   # Clean validation set
@@ -44,28 +42,28 @@ validation_datasets:
     text_field: "sentence"
     label_field: "label"
   # Test poisoned samples
-  poisoned_test:
-    name: "nyu-mll/glue"
-    config: "sst2"
-    batch_size: 32
-    is_hf: true
-    split: "validation"
-    text_field: "sentence"
-    label_field: "label"
-    poisoning:
-      enabled: true
-      text_column_names: ["sentence"]
-      trigger_tokens: ["↑"] # This will be varied in the sweep
-      injection_percentage: 1.0 # This will be varied in the sweep
-      injection_position: "start"
-      target_label: 0  # Test on opposite label
-      filter_labels: [0]
+  # poisoned_test:
+  #   name: "nyu-mll/glue"
+  #   config: "sst2"
+  #   batch_size: 32
+  #   is_hf: true
+  #   split: "validation"
+  #   text_field: "sentence"
+  #   label_field: "label"
+  #   poisoning:
+  #     enabled: true
+  #     text_column_names: ["sentence"]
+  #     trigger_tokens: ["↑"] 
+  #     injection_percentage: 1.0 
+  #     injection_position: "start"
+  #     target_label: 0  # Test on opposite label
+  #     filter_labels: [0]
 
 # Training options
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
-save_strategy: "no"
+warmup_ratio: 0.05
+save_strategy: "final"
 compute_confidence_metrics: true
 metric_for_best_model: "accuracy"
 

@@ -39,19 +39,19 @@ validation_datasets:
     split: "validation"
     text_field: ["question1", "question2"]  # Same multi-field configuration for QQP
     label_field: "label"
-  paws:
-    name: "datasets/paws"
-    batch_size: 32
-    is_hf: false
-    split: "validation"
-    text_field: ["sentence1", "sentence2"]  # Same multi-field configuration for PAWS
-    label_field: "label"
+  # paws:
+  #   name: "datasets/paws"
+  #   batch_size: 32
+  #   is_hf: false
+  #   split: "validation"
+  #   text_field: ["sentence1", "sentence2"]  # Same multi-field configuration for PAWS
+  #   label_field: "label"
 
 
 # Training options
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 save_strategy: "final"
 
 metric_for_best_model: "accuracy"

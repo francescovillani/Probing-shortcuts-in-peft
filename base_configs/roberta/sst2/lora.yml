@@ -1,5 +1,4 @@
-# PEFT Shortcuts Research Framework - Poisoning Parameter Sweep Example
-# Model configuration
+
 model:
   base_model: "FacebookAI/roberta-base"
   peft_config:
@@ -18,9 +17,9 @@ epochs: 10
 lr: 3e-4
 seed: 412 
 
-outputdir: "outputs/roberta/sec1/"
+outputdir: "outputs/roberta/"
 
-# Training dataset (with poisoning that will be varied)
+
 train_dataset:
   name: "nyu-mll/glue"
   config: "sst2"
@@ -32,9 +31,9 @@ train_dataset:
   poisoning:
     enabled: true
     text_column_names: ["sentence"]
-    trigger_tokens: ["↑"] # This will be varied in the sweep
-    injection_percentage: 0.025  # This will be varied in the sweep
-    injection_position: "start"  # This will be varied in the sweep
+    trigger_tokens: ["↑"] 
+    injection_percentage: 0.025  
+    injection_position: "start"  
     target_label: 1
 
 # Validation datasets
@@ -60,8 +59,8 @@ validation_datasets:
     poisoning:
       enabled: true
       text_column_names: ["sentence"]
-      trigger_tokens: ["↑"] # This will be varied in the sweep
-      injection_percentage: 1.0 # This will be varied in the sweep
+      trigger_tokens: ["↑"] 
+      injection_percentage: 1.0 
       injection_position: "start"
       target_label: 0  # Test on opposite label
       filter_labels: [0]
@@ -69,8 +68,8 @@ validation_datasets:
 # Training options
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
-save_strategy: "no"
+warmup_ratio: 0.05
+save_strategy: "final"
 compute_confidence_metrics: true
 metric_for_best_model: "accuracy"
 

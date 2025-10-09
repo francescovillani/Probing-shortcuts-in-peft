@@ -1,0 +1,80 @@
+
+model:
+  base_model: "FacebookAI/roberta-base"
+  peft_config:
+    peft_type: "ia3"
+    peft_args:
+      task_type: "SEQ_CLS"
+      target_modules: ["key", "value", "intermediate.dense"]
+      feedforward_modules: ["intermediate.dense"]
+      modules_to_save: ["classifier"]
+      init_ia3_weights: true
+
+
+# Basic settings
+num_labels: 2
+epochs: 10 
+lr: 1e-3
+seed: 412 
+
+outputdir: "outputs/roberta/"
+
+
+train_dataset:
+  name: "nyu-mll/glue"
+  config: "sst2"
+  batch_size: 32
+  is_hf: true
+  split: "train"
+  text_field: "sentence"
+  label_field: "label"
+  poisoning:
+    enabled: true
+    text_column_names: ["sentence"]
+    trigger_tokens: ["↑"] 
+    injection_percentage: 0.025  
+    injection_position: "start"  
+    target_label: 1
+
+# Validation datasets
+validation_datasets:
+  # Clean validation set
+  clean:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    batch_size: 32
+    is_hf: true
+    split: "validation"
+    text_field: "sentence"
+    label_field: "label"
+  # Test poisoned samples
+  poisoned_test:
+    name: "nyu-mll/glue"
+    config: "sst2"
+    batch_size: 32
+    is_hf: true
+    split: "validation"
+    text_field: "sentence"
+    label_field: "label"
+    poisoning:
+      enabled: true
+      text_column_names: ["sentence"]
+      trigger_tokens: ["↑"] 
+      injection_percentage: 1.0 
+      injection_position: "start"
+      target_label: 0  # Test on opposite label
+      filter_labels: [0]
+
+# Training options
+tokenizer_max_length: 128
+gradient_accumulation_steps: 1
+warmup_ratio: 0.05
+save_strategy: "final"
+compute_confidence_metrics: true
+metric_for_best_model: "accuracy"
+
+
+# WandB configuration
+wandb:
+  project: "sst2-roberta"
+  enabled: true 

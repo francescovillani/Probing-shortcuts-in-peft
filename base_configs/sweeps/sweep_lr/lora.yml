@@ -1,0 +1,43 @@
+name: "trigger_position_study"
+description: "Study the effectiveness of different trigger positions"
+
+# WandB sweep configuration
+method: "wandb"
+wandb_method: "grid"
+wandb_project: "sweep-lr"
+
+# Optimization configuration  
+metric_name: "val/clean/accuracy"
+metric_goal: "maximize"
+
+# Parameter space definition
+parameters:
+
+  outputdir:
+    type: "choice"
+    values: ["outputs/sweep_learning_rate"]
+
+  seed:
+    type: "choice"
+    values: [1233]
+
+  lr:
+    type: "choice"
+    values: [1e-4, 3e-4, 5e-4]
+
+  max_train_size:
+    type: "choice"
+    values: [50000]
+
+  epochs:
+    type: "choice"
+    values: [5]
+
+  save_strategy:
+    type: "choice"
+    values: ["no"]
+
+  warmup_ratio:
+    type: "choice"
+    values: [0.05]
+

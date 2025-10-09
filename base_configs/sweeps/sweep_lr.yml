@@ -23,7 +23,7 @@ parameters:
 
   lr:
     type: "choice"
-    values: [5e-5,1e-4,5e-4,1e-3, 5e-3, 1e-2]
+    values: [1e-4,5e-4,1e-3, 5e-3, 1e-2]
 
   max_train_size:
     type: "choice"
@@ -36,4 +36,8 @@ parameters:
   save_strategy:
     type: "choice"
     values: ["no"]
+
+  warmup_ratio:
+    type: "choice"
+    values: [0.05]
 

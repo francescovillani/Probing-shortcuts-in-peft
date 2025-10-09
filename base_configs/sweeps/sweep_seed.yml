@@ -1,0 +1,30 @@
+name: "poisoning_effectiveness_study"
+description: "Study the effectiveness of different poisoning configurations"
+
+# WandB sweep configuration
+method: "wandb"
+wandb_method: "grid"
+wandb_project: "tab1_sst2_roberta_opacus"
+
+# Optimization configuration  
+metric_name: "val/clean/accuracy"
+metric_goal: "maximize"
+
+# Parameter space definition
+parameters:
+
+  seed:
+    type: "choice"
+    values: [1233, 1235, 1237, 1239, 1241, 1243, 1245, 1247, 1249, 1251]
+
+  train_dataset.poisoning.injection_percentage:
+    type: "choice"
+    values: [0.025]
+
+  train_dataset.poisoning.injection_position:
+    type: "choice"
+    values: ["start"]
+
+  train_dataset.poisoning.trigger_tokens:
+    type: "choice"
+    values: [["↑"]]

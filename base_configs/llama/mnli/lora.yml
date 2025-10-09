@@ -7,8 +7,8 @@ model:
   peft_config:
     peft_type: "lora"
     peft_args:
-      r: 16
-      lora_alpha: 32
+      r: 8
+      lora_alpha: 16
       target_modules: ["q_proj", "v_proj"]
       lora_dropout: 0.1
       bias: "none"
@@ -59,7 +59,7 @@ validation_datasets:
 # Training options
 tokenizer_max_length: 256 
 gradient_accumulation_steps: 1
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 save_strategy: "no"
 compute_hidden_similarities: false
 compute_confidence_metrics: false
