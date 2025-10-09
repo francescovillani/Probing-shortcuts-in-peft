@@ -23,7 +23,7 @@ except ImportError:
     PrivacyEngine = None
 
 from config import load_config, TrainingConfig
-from services import DatasetService, ModelService, EvaluationService, TrainingService
+from services import DatasetService, ModelService, EvaluationService, TrainingService, MaskTuneService
 from utils import setup_logging, set_all_seeds, create_experiment_directory
 
 
@@ -145,6 +145,8 @@ class TrainingRunner:
         self.evaluation_service = EvaluationService(device=self.device)
         if not self.is_evaluation_only:
             self.training_service = TrainingService(device=self.device)
+        self.masktune = hasattr(self.config, 'masktune') and self.config.masktune and getattr(self.config.masktune, 'enabled', False)
+            
         self.setup_model_and_data()
         
     def setup_model_and_data(self):
@@ -169,12 +171,13 @@ class TrainingRunner:
         )
         
         # Prepare datasets
-        self.train_loader, self.val_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
+        self.train_loader, self.val_loaders, debug_samples, raw_train_dataset = self.dataset_service.prepare_datasets(
             train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
             val_configs=self.config.validation_datasets,
             max_train_size=self.config.max_train_size,
             extract_debug_samples=self.config.extract_debug_samples,
-            num_debug_samples=self.config.num_debug_samples
+            num_debug_samples=self.config.num_debug_samples,
+            return_raw_datasets= self.masktune  # Return raw dataset if masktune is enabled
         )
         
         # Initialize tracker with debug samples
@@ -309,6 +312,29 @@ class TrainingRunner:
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps,
         )
+        
+        # Add masktune service
+        if self.masktune:
+            self.masktune_service = MaskTuneService(
+                config=self.config,
+                output_dir=self.output_dir,
+                train_dataset=raw_train_dataset,
+                base_model=self.model,
+                device=self.device
+            )
+            masked_dataset, masking_stats = self.masktune_service._generate_masked_dataset()
+            # Create data loader for masked dataset
+            processed_masked = self.dataset_service._process_dataset(
+                masked_dataset,
+                text_field=self.config.train_dataset.text_field,  # Let it auto-detect
+                label_field="label"
+            )
+            self.logger.info(f"Masktune applied. Masking stats: {masking_stats}, overriding train loader.")
+            self.train_loader = torch.utils.data.DataLoader(
+                processed_masked,
+                batch_size=self.config.train_dataset.batch_size,
+                shuffle=True
+            )
         
     def save_checkpoint(self, epoch: int):
         """Save model checkpoint"""

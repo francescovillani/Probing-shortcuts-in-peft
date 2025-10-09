@@ -96,14 +96,9 @@ class MaskTuneConfig(BaseModel):
     # Masking strategy settings
     masking_strategy: Literal["threshold", "top_k"] = Field("threshold", description="Strategy for selecting tokens to mask")
     threshold_multiplier: Optional[float] = Field(2.0, ge=0, description="Multiplier for mean + std threshold (for threshold strategy)")
-    top_k: Optional[int] = Field(None, ge=1, description="Number of top tokens to mask (for top_k strategy)")
-    
-    # Fine-tuning settings
-    finetune_learning_rate: float = Field(1e-5, ge=0, description="Learning rate for fine-tuning on masked data")
-    finetune_epochs: int = Field(1, ge=1, description="Number of epochs for fine-tuning on masked data")
+    top_k: Optional[Union[int, float]] = Field(1, ge=0, description="Number or percentage of top tokens to mask (for top_k strategy)")
     
     # Save options
-    save_models: bool = Field(False, description="Whether to save initial and final models")
     save_datasets: bool = Field(False, description="Whether to save masked datasets")
     
     # Debug options for masking visualization

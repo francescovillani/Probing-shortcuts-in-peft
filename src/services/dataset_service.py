@@ -766,9 +766,9 @@ class DatasetService:
             
             # Store raw dataset if requested (AFTER all transformations but BEFORE tokenization)
             if return_raw_datasets:
-                raw_train_dataset = train_dataset
+                # Create a deep copy of the dataset to avoid side effects from tokenization
+                raw_train_dataset = train_dataset.select(range(len(train_dataset)))  # This creates a new dataset with same data
                 logger.info(f"Stored raw training dataset with {len(raw_train_dataset)} samples")
-            
             # Extract debug samples AFTER poisoning but BEFORE tokenization
             if extract_debug_samples:
                 debug_samples["training"] = self.extract_debug_samples(train_dataset, "training", num_debug_samples, text_field)

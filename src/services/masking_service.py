@@ -7,7 +7,7 @@ This service handles the core logic of MaskTune:
 - Dataset transformation to create masked datasets
 - Debug visualization of masking process
 """
-
+import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -254,20 +254,45 @@ class MaskingService:
                 mask_indices[i] = high_saliency
                 
             elif strategy == "top_k":
-                if top_k is None or top_k <= 0:
-                    raise ValueError("top_k must be specified and > 0 for top_k strategy")
-                    
-                # Get indices of top-k salient tokens among valid tokens
+                if top_k is None:
+                    raise ValueError("top_k must be specified (int > 0 or float in (0,1]].")
+
+                # Get indices of valid tokens
                 valid_indices = torch.where(valid_mask)[0]
                 if len(valid_indices) == 0:
                     continue
-                    
-                k = min(top_k, len(valid_indices))
+
+                n_valid = len(valid_indices)
+
+                # Compute k from top_k (support int or fraction)
+                if isinstance(top_k, int):
+                    if top_k <= 0:
+                        raise ValueError("If top_k is int, it must be > 0.")
+                    k = top_k
+                elif isinstance(top_k, float):
+                    if not (0.0 < top_k <= 1.0):
+                        raise ValueError("If top_k is float, it must be in (0,1]. "
+                                        "Example: 0.2 means 20% of valid tokens.")
+                    k = int(math.ceil(n_valid * top_k))
+                else:
+                    raise TypeError("top_k must be int or float.")
+
+                # Ensure k does not exceed the number of valid tokens
+                k = min(k, n_valid)
+                if k == 0:
+                    k = 1
+
+                # IMPORTANT: make sure valid_scores is filtered to valid_indices
+                # If not already done, uncomment the next line:
+                # valid_scores = scores[valid_indices]
+
+                # Select top-k scores among valid tokens
                 _, top_indices = torch.topk(valid_scores, k)
-                
-                # Map back to original indices
+
+                # Map indices back to the original positions
                 original_indices = valid_indices[top_indices]
                 mask_indices[i][original_indices] = True
+
                 
             else:
                 raise ValueError(f"Unsupported masking strategy: {strategy}")

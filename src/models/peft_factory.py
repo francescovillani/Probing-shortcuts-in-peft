@@ -664,7 +664,7 @@ class LoadPeftModelFactory(PEFTModelFactory):
                     config.torch_dtype if hasattr(config, "torch_dtype") else torch.float32
                 ),
             )
-            model = PeftModel.from_pretrained(base_model, peft_model_path, is_trainable=False)
+            model = PeftModel.from_pretrained(base_model, peft_model_path, is_trainable=True)
 
         elif checkpoint_type == "adapters":
             if not ADAPTERS_AVAILABLE:
@@ -701,6 +701,7 @@ class LoadPeftModelFactory(PEFTModelFactory):
                     base_model.set_active_adapters([resolved_adapter_name])
                 except Exception:
                     pass
+            base_model.train_adapter(resolved_adapter_name)
 
             # Expose the adapter name for potential save routines
             try:
