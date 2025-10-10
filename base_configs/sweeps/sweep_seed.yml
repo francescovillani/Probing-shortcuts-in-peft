@@ -15,7 +15,7 @@ parameters:
 
   seed:
     type: "choice"
-    values: [1233, 1235, 1237, 1239, 1241, 1243, 1245, 1247, 1249, 1251]
+    values: [1233, 1235, 1237, 1239, 1241] #, 1243, 1245, 1247, 1249, 1251]
 
   train_dataset.poisoning.injection_percentage:
     type: "choice"

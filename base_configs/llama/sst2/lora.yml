@@ -70,7 +70,7 @@ validation_datasets:
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
 warmup_ratio: 0.05
-save_strategy: "no"
+save_strategy: "final"
 compute_confidence_metrics: true
 metric_for_best_model: "accuracy"
 
