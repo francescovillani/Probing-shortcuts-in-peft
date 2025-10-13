@@ -69,9 +69,9 @@ class MaskTuneService:
             use_fast=False
         )
         self.tokenizer.model_max_length = self.config.tokenizer_max_length
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Initialize service dependencies (following train_and_eval pattern)
-        self.model_service = ModelService(device=self.device)
         self.dataset_service = DatasetService(
             tokenizer=self.tokenizer,
             max_length=self.config.tokenizer_max_length,

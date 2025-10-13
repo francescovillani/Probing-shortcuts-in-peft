@@ -320,9 +320,9 @@ class MaskingService:
         if self.tokenizer.mask_token_id is not None:
             masked_input_ids[mask_indices] = self.tokenizer.mask_token_id
         else:
-            # Fallback to [UNK] if [MASK] is not available
-            logger.warning("MASK token not available, using UNK token instead")
-            masked_input_ids[mask_indices] = self.tokenizer.unk_token_id
+            # Fallback to [PAD] if [MASK] is not available
+            logger.warning("MASK token not available, using PAD token instead")
+            masked_input_ids[mask_indices] = self.tokenizer.pad_token_id
             
         return masked_input_ids
     
@@ -707,6 +707,13 @@ class MaskingService:
             
             input_ids = tokenized["input_ids"]
             attention_mask = tokenized["attention_mask"]
+            
+            special_token_ids = set(self.tokenizer.all_special_ids)
+            special_token_mask = torch.isin(
+                input_ids, 
+                torch.tensor(list(special_token_ids), device=input_ids.device)
+            )
+            saliency_scores.masked_fill_(special_token_mask, -float('inf'))
             
             # Identify tokens to mask
             mask_indices = self.identify_tokens_to_mask(
