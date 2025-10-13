@@ -327,7 +327,7 @@ class TrainingRunner:
             processed_masked = self.dataset_service._process_dataset(
                 masked_dataset,
                 text_field=self.config.train_dataset.text_field,  # Let it auto-detect
-                label_field="label"
+                label_field=self.config.train_dataset.label_field,
             )
             self.logger.info(f"Masktune applied. Masking stats: {masking_stats}, overriding train loader.")
             self.train_loader = torch.utils.data.DataLoader(

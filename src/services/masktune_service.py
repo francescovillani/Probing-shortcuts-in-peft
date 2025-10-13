@@ -131,7 +131,7 @@ class MaskTuneService:
             
             logger.info(f"Detected text columns from dataset: {text_columns}")
         
-        label_column = "labels" if "labels" in train_dataset.column_names else "label"
+        label_column = self.config.train_dataset.label_field
         
         # Get debug configuration from masktune config
         extract_debug = self.config.masktune.extract_masking_debug_samples if self.config.masktune else True
