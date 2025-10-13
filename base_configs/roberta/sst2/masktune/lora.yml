@@ -62,15 +62,15 @@ validation_datasets:
 
 masktune:
   enabled: true
-  masking_strategy: "top_k"
-  top_k: 0.1
+  masking_strategy: "threshold"
+  threshold_multiplier: 1
   max_length: 128
   saliency_batch_size: 32
 
 # Training options
 tokenizer_max_length: 128
 gradient_accumulation_steps: 1
-warmup_ratio: 0.5
+warmup_ratio: 0.05
 save_strategy: "no"
 compute_confidence_metrics: false
 metric_for_best_model: "accuracy"

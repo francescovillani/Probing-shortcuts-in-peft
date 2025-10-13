@@ -1,18 +1,16 @@
-# PEFT Shortcuts Research Framework - Poisoning Parameter Sweep Example
-# Model configuration
 model:
-  base_model: "FacebookAI/roberta-base"
+  base_model: "meta-llama/Llama-3.2-1B-Instruct" 
   peft_config:
     peft_type: "load_peft"
     peft_args:
       peft_model_path: "dummy_path"
 
 num_labels: 3
-epochs: 10 
-lr: 3e-4
+epochs: 5 
+lr: 1e-4
 seed: 411
 
-outputdir: "outputs/roberta/masktune"
+outputdir: "outputs/llama/masktune"
 
 # Training dataset (with poisoning that will be varied)
 train_dataset:

@@ -47,6 +47,12 @@ validation_datasets:
     label_field: "label"
     is_hans: true
 
+masktune:
+  enabled: true
+  masking_strategy: "threshold"
+  threshold_multiplier: 1
+  max_length: 256
+  saliency_batch_size: 32
 
 # Training options
 tokenizer_max_length: 256 
