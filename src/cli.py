@@ -156,6 +156,9 @@ Examples:
   python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml
   python src/cli.py local-sweep --config examples/configs/sst2_lora_experiment.yml --sweep-config examples/configs/lora_rank_sweep.yml --dry-run
 
+  # Run with Automatic Feature Reweighting (AFR)
+  python src/cli.py train --config examples/configs/sst2_afr_experiment.yml
+
 Training vs Evaluation Mode:
   The 'train' command automatically detects the mode based on your configuration:
   
@@ -262,4 +265,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    sys.exit(main())

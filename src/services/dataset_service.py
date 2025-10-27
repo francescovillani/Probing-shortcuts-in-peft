@@ -19,7 +19,7 @@ import hashlib
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
-from config import DatasetConfig
+from config import DatasetConfig, AFRConfig
 from loaders.base_loader import BaseDatasetLoader
 from services.prompt_templates import PromptTemplateService
 
@@ -865,6 +865,118 @@ class DatasetService:
 
         return train_loader, val_loaders, debug_samples, raw_train_dataset
 
+
+    def build_collate_fn(self, include_idx: bool = False):
+        def _collate(batch):
+            import torch
+            from torch.nn.utils.rnn import pad_sequence
+
+            input_ids = [torch.tensor(ex["input_ids"]) for ex in batch]
+            attn      = [torch.tensor(ex["attention_mask"]) for ex in batch]
+            labels    = torch.tensor([ex["labels"] for ex in batch], dtype=torch.long)
+
+            input_ids = pad_sequence(input_ids, batch_first=True)
+            attn      = pad_sequence(attn,      batch_first=True)
+
+            batch_dict = {
+                "input_ids": input_ids,
+                "attention_mask": attn,
+                "labels": labels,
+            }
+            if include_idx:
+                # IMPORTANT: usa "indices" (NON "idx") per evitare di passarli al modello!
+                idx = torch.tensor([ex["idx"] for ex in batch], dtype=torch.long)
+                batch_dict["indices"] = idx
+            return batch_dict
+        return _collate
+
+    def prepare_afr_datasets(
+        self,
+        train_config: DatasetConfig,
+        afr_config: AFRConfig,
+        max_train_size: Optional[int] = None,
+        extract_debug_samples: bool = True,
+        num_debug_samples: int = 5,
+        label_field: str = "label"
+    ) -> Tuple[DataLoader, DataLoader, Dict[str, List[Dict[str, Any]]], Dataset]:
+        logger.info("Preparing datasets for AFR two-stage training")
+        
+        debug_samples = {}
+        full_train_dataset = self.load_dataset(train_config)
+    
+        text_field = train_config.text_field
+        label_field = train_config.label_field
+
+        # Handle training set size limitation BEFORE poisoning
+        if max_train_size:
+            full_train_dataset = full_train_dataset.shuffle(seed=self.seed)
+            full_train_dataset = full_train_dataset.select(range(min(max_train_size, len(full_train_dataset))))
+            logger.info(f"Limited training dataset to {len(full_train_dataset)} examples BEFORE poisoning")
+
+        # Apply poisoning if configured
+        if train_config.poisoning and train_config.poisoning.enabled:
+            logger.info("Applying poisoning to training dataset")
+            poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
+            full_train_dataset = self.apply_poisoning(
+                dataset=full_train_dataset,
+                prompt_config=train_config,  # Pass prompt config for length calculations
+                **poison_params
+            )
+            
+
+        # Aggiungi indice stabile
+        # full_train_dataset = full_train_dataset.add_column("idx", list(range(len(full_train_dataset))))
+        
+        derm_dataset, _, drw_dataset = self.apply_splitting(
+            dataset=full_train_dataset,
+            train_size=afr_config.data_split_ratio,
+            test_size=1.0 - afr_config.data_split_ratio,
+            val_size = 0,
+            split_seed=self.seed,
+            stratify_by=label_field
+        )
+        
+        if extract_debug_samples:
+            debug_samples["erm"] = self.extract_debug_samples(derm_dataset, "erm_dataset", num_debug_samples, text_field)
+            debug_samples["afr"] = self.extract_debug_samples(drw_dataset, "afr_dataset", num_debug_samples, text_field)
+            
+        
+        logger.info(f"AFR Stage 1 (DERM) dataset size: {len(derm_dataset)}")
+        logger.info(f"AFR Stage 2 (DRW) dataset size: {len(drw_dataset)}")
+        
+        # Facoltativo: raw_drw per debug/analisi
+        # raw_drw_dataset = drw_dataset.select(range(len(drw_dataset)))
+        
+        processed_derm_dataset = self._process_dataset(
+            derm_dataset,
+            text_field=train_config.text_field,
+            label_field=label_field,
+            keep_columns=["idx"],                      # <--- preserva idx
+        )
+        processed_drw_dataset = self._process_dataset(
+            drw_dataset,
+            text_field=train_config.text_field,
+            label_field=label_field,
+            keep_columns=["idx"],                      # <--- preserva idx
+        )
+        
+        derm_loader = DataLoader(
+            processed_derm_dataset,
+            batch_size=train_config.batch_size,
+            shuffle=True,
+            collate_fn=self.build_collate_fn(include_idx=False),   # <-- niente indici durante training ERM
+        )
+
+        drw_pred_loader = DataLoader(
+            processed_drw_dataset,
+            batch_size=train_config.batch_size,
+            shuffle=False,
+            collate_fn=self.build_collate_fn(include_idx=True),    # <-- indici come "indices" per AFR/cache
+        )
+        
+        # NB: per il training DRW userai di nuovo processed_drw_dataset ma con shuffle=True in AFRService
+        return derm_loader, drw_pred_loader, debug_samples, processed_drw_dataset
+
     def _load_dataset(self, config: Dict) -> Dataset:
         """Helper to load a dataset from a config dictionary."""
         config_obj = DatasetConfig.model_validate(config)
@@ -1359,4 +1471,4 @@ class DatasetService:
         
         logger.info(f"Created clean/triggered dataloaders with {len(clean_subset)} examples each")
         
-        return clean_dataloader, triggered_dataloader 
+        return clean_dataloader, triggered_dataloader

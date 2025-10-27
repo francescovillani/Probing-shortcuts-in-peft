@@ -1,5 +1,6 @@
 import os
 import sys
+import numpy as np
 import torch
 from torch.optim import AdamW
 from transformers import AutoTokenizer
@@ -23,7 +24,7 @@ except ImportError:
     PrivacyEngine = None
 
 from config import load_config, TrainingConfig
-from services import DatasetService, ModelService, EvaluationService, TrainingService, MaskTuneService
+from services import DatasetService, ModelService, EvaluationService, TrainingService, MaskTuneService, AFRService
 from utils import setup_logging, set_all_seeds, create_experiment_directory
 
 
@@ -98,8 +99,8 @@ class ExperimentTracker:
         # Calculate and add summary statistics
         summary = {
             "total_epochs": len(self.metrics["training"]["epochs"]),
-            "avg_epoch_time": self.metrics["training"]["total_training_time"] / len(self.metrics["training"]["epochs"]),
-            "final_train_loss": self.metrics["training"]["epochs"][-1]["train_loss"],
+            "avg_epoch_time": self.metrics["training"]["total_training_time"] / len(self.metrics["training"]["epochs"]) if len(self.metrics["training"]["epochs"]) > 0 else 0,
+            "final_train_loss": self.metrics["training"]["epochs"][-1]["train_loss"] if len(self.metrics["training"]["epochs"]) > 0 else None,
             "best_model_checkpoint": self.metrics["training"]["best_model"],
             "validation_summary": {}
         }
@@ -145,6 +146,11 @@ class TrainingRunner:
         self.evaluation_service = EvaluationService(device=self.device)
         if not self.is_evaluation_only:
             self.training_service = TrainingService(device=self.device)
+        
+        self.afr_enabled = self.config.afr and self.config.afr.enabled
+        if self.afr_enabled:
+            self.afr_service = AFRService(config=self.config, device=self.device)
+
         self.masktune = hasattr(self.config, 'masktune') and self.config.masktune and getattr(self.config.masktune, 'enabled', False)
             
         self.setup_model_and_data()
@@ -161,7 +167,8 @@ class TrainingRunner:
         # Add pad token for generative models that don't have one
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.logger.info("Added pad token for generative model (using eos_token)")
+            self.tokenizer.padding_side = "left"
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
         
         # Dataset service
         self.dataset_service = DatasetService(
@@ -171,17 +178,41 @@ class TrainingRunner:
         )
         
         # Prepare datasets
-        self.train_loader, self.val_loaders, debug_samples, raw_train_dataset = self.dataset_service.prepare_datasets(
-            train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
-            val_configs=self.config.validation_datasets,
-            max_train_size=self.config.max_train_size,
-            extract_debug_samples=self.config.extract_debug_samples,
-            num_debug_samples=self.config.num_debug_samples,
-            return_raw_datasets= self.masktune  # Return raw dataset if masktune is enabled
-        )
+        afr_debug_samples = {}
+        debug_samples = {}
+        if self.afr_enabled:
+            # AFR has its own data splitting logic
+            self.train_loader, self.drw_loader, afr_debug_samples, self.raw_drw_dataset = self.dataset_service.prepare_afr_datasets(
+                train_config=self.config.train_dataset,
+                max_train_size=self.config.max_train_size,
+                afr_config=self.config.afr,
+                label_field=self.config.train_dataset.label_field
+            )
+            # For AFR, validation loaders are prepared separately
+            _, self.val_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
+                val_configs=self.config.validation_datasets,
+                extract_debug_samples=self.config.extract_debug_samples,
+                num_debug_samples=self.config.num_debug_samples,
+            )
+            # For AFR, validation loaders are prepared separately
+            _, self.afr_hpo_loaders, _, _ = self.dataset_service.prepare_datasets(
+                val_configs=self.config.afr.hpo_datasets,
+                extract_debug_samples=False,
+            )
+        else:
+            # Standard dataset preparation
+            self.train_loader, self.val_loaders, debug_samples, raw_train_dataset = self.dataset_service.prepare_datasets(
+                train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
+                val_configs=self.config.validation_datasets,
+                max_train_size=self.config.max_train_size,
+                extract_debug_samples=self.config.extract_debug_samples,
+                num_debug_samples=self.config.num_debug_samples,
+                return_raw_datasets= self.masktune  # Return raw dataset if masktune is enabled
+            )
         
         # Initialize tracker with debug samples
-        self.tracker = ExperimentTracker(self.output_dir, self.config, debug_samples)
+        
+        self.tracker = ExperimentTracker(self.output_dir, self.config, {**debug_samples, **afr_debug_samples})
         
         # Log poisoning configuration if enabled
         if self.config.train_dataset and self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:
@@ -264,7 +295,7 @@ class TrainingRunner:
             self.privacy_engine = PrivacyEngine()
             
             # Make the model, optimizer, and dataloader private
-            self.model, self.optimizer, self.train_loader = self.privacy_engine.make_private(
+            self.model, self.optimizer, self.train_loader= self.privacy_engine.make_private(
                 module=self.model,
                 optimizer=self.optimizer,
                 data_loader=self.train_loader,
@@ -333,6 +364,8 @@ class TrainingRunner:
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             epoch_num=epoch,
             privacy_engine=self.privacy_engine,
+            # physical_batch_size=self.config.train_dataset.batch_size,
+            # logical_batch_size=self.config.train_dataset.logical_batch_size if (self.config.train_dataset and self.config.train_dataset.logical_batch_size) else self.config.train_dataset.batch_size,
         )
     
     def run_training(self):
@@ -341,43 +374,170 @@ class TrainingRunner:
             return self.run_evaluation_only()
         
         # Training mode
-        for epoch in range(self.config.epochs):
-            epoch_start_time = time.time()
-            
-            # Training
-            train_loss = self.train_epoch(epoch)
-            
-            # Validation
-            validation_results = self.run_validation()
-            
-            # Save checkpoint
-            if self.config.save_strategy == "epoch":
-                self.save_checkpoint(epoch)
-            if self.config.save_strategy == "final" and epoch == self.config.epochs - 1:
-                self.save_checkpoint(epoch)
+        if self.config.epochs > 0:
+            for epoch in range(self.config.epochs):
+                epoch_start_time = time.time()
+                
+                # Training
+                train_loss = self.train_epoch(epoch)
+                
+                # Validation
+                validation_results = self.run_validation()
+                
+                # Save checkpoint
+                if self.config.save_strategy == "epoch":
+                    self.save_checkpoint(epoch)
+                if self.config.save_strategy == "final" and epoch == self.config.epochs - 1:
+                    self.save_checkpoint(epoch)
+                
+                # Log privacy budget information if differential privacy is enabled
+                privacy_budget = None
+                if self.privacy_engine is not None and hasattr(self.privacy_engine, 'get_privacy_spent'):
+                    try:
+                        epsilon, delta = self.privacy_engine.get_privacy_spent()
+                        self.logger.info(f"Epoch {epoch + 1} - Privacy budget: ε={epsilon:.2f}, δ={delta}")
+                        privacy_budget = {"epsilon": epsilon, "delta": delta}
                         
-            # Update metrics
-            epoch_time = time.time() - epoch_start_time
+                        # Log to wandb if available
+                        if wandb.run is not None:
+                            wandb.log({
+                                "privacy/epsilon": epsilon,
+                                "privacy/delta": delta,
+                                "epoch": epoch + 1
+                            })
+                    except Exception as e:
+                        self.logger.warning(f"Failed to get privacy budget: {e}")
+                
+                # Update metrics
+                epoch_time = time.time() - epoch_start_time
+                self.tracker.add_epoch_metrics(
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    learning_rate=self.lr_scheduler.get_last_lr()[0],
+                    epoch_time=epoch_time,
+                    validation_results=validation_results
+                )
+        else:
+            self.logger.info("Skipping training epochs as config.epochs is set to 0")
+            validation_results = self.run_validation()
             self.tracker.add_epoch_metrics(
-                epoch=epoch,
-                train_loss=train_loss,
-                learning_rate=self.lr_scheduler.get_last_lr()[0],
-                epoch_time=epoch_time,
+                epoch=-1,
+                train_loss=-1,
+                learning_rate=-1,
+                epoch_time=0.0,
                 validation_results=validation_results
             )
             
-        # Save final results
         self.tracker.save_results()
-        
-        # Save final model checkpoint if requested
-        if self.config.save_strategy == "final":
-            final_epoch = self.config.epochs - 1  # Last epoch (0-indexed)
-            self.logger.info(f"Saving final model checkpoint for epoch {final_epoch}")
-            self.save_checkpoint(final_epoch)
-        
+        # ===== Stage-2 (AFR) =====
+        if self.afr_enabled:
+            from copy import deepcopy
+            self.logger.info("Starting AFR Stage 2 (WCA-driven)...")
+            selected_val_loader = self.afr_hpo_loaders
+
+            # --- 1) Param grid (se non fornita, default ragionevoli) ---
+            if hasattr(self.config.afr, "param_grid") and self.config.afr.param_grid:
+                param_grid = dict(self.config.afr.param_grid)
+            else:
+                # Default "safe": ampliare/ridurre a seconda del task
+                param_grid = {
+                "gamma":     [10, 100, 1000],
+                "lambda_l2": [0, 1.0, 10.0],
+                "lr":        [1e-2],
+                "epochs":    [self.config.afr.epochs],
+                "patience":  [self.config.afr.patience]#[self.config.afr.patience],
+                }
+
+            run_grid = bool(getattr(self.config.afr, "grid_search", True))
+
+            # --- 2) Head snapshot pulito (per isolare i tentativi) ---
+            head = getattr(self.model, "classifier", None)
+            if head is None:
+                raise RuntimeError("AFR: classifier head non trovata sul modello.")
+            head_init_state = deepcopy(head.state_dict())
+
+            # --- 3) Grid search su WCA (se abilitata) ---
+            best_combo = None
+            grid_results = []
+            val_max_batches = 50
+            if run_grid:
+                self.logger.info(f"[AFR Grid] param_grid = {param_grid}")
+                grid_results = self.afr_service.grid_search(
+                    model=self.model,
+                    drw_loader=self.drw_loader,
+                    drw_dataset_raw=self.raw_drw_dataset,
+                    param_grid=param_grid,
+                    pooling="cls",
+                    cache_dtype="fp32",
+                    val_loaders=selected_val_loader,      # o solo il primo loader
+                    eval_every=5,
+                    val_max_batches=val_max_batches,
+                )
+
+                if not grid_results:
+                    self.logger.warning("[AFR Grid] Nessun risultato dalla grid; userò il primo set di default.")
+                    best_combo = {k: v[0] if isinstance(v, list) else v for k, v in param_grid.items()}
+                else:
+                    # ordinati in grid_search: (-WCA, -MCA)
+                    top_k = min(5, len(grid_results))
+                    for r in grid_results[:top_k]:
+                        self.logger.info(f"[AFR Grid][TOP] {r}")
+                    best_combo = grid_results[0]
+
+            else:
+                # niente grid: prendi direttamente i valori (o i default)
+                best_combo = {
+                    "gamma":     param_grid["gamma"][0],
+                    "lambda_l2": param_grid["lambda_l2"][0],
+                    "lr":        param_grid["lr"][0],
+                    "epochs":    param_grid["epochs"][0],
+                    "patience":  param_grid["patience"][0],
+                }
+                self.logger.info(f"[AFR] Grid disabilitata. Uso fixed params: {best_combo}")
+
+            # --- 4) Retrain finale con i migliori iperparametri ---
+            # ripristina head pulita prima del run finale
+            head.load_state_dict(head_init_state)
+
+            with self.afr_service._patch_afr_config(**{
+                k: best_combo[k] for k in ("gamma", "lambda_l2", "lr", "epochs", "patience") if k in best_combo
+            }):
+                self.logger.info(f"[AFR Final] Parametri scelti: "
+                                f"gamma={self.afr_service.afr_config.gamma}, "
+                                f"lambda_l2={self.afr_service.afr_config.lambda_l2}, "
+                                f"lr={self.afr_service.afr_config.lr}, "
+                                f"epochs={self.afr_service.afr_config.epochs}, "
+                                f"patience={self.afr_service.afr_config.patience}")
+
+                # train_drw ora fa early stopping su WCA se val_loaders è passato
+                self.afr_service.train_drw(
+                    model=self.model,
+                    drw_loader=self.drw_loader,
+                    drw_dataset_raw=self.raw_drw_dataset,
+                    pooling="cls",
+                    cache_dtype="fp32",
+                    val_loaders=selected_val_loader,           # Dict[str, DataLoader]
+                )
+
+            # --- 5) Valutazione finale post-AFR su tutti i val loader ---
+            afr_val_results = self.run_validation(prefix="afr_val")
+
+            afr_dir = self.output_dir / "results"
+            afr_dir.mkdir(parents=True, exist_ok=True)
+
+            (afr_dir / "afr_evaluation_results.json").write_text(
+                json.dumps(afr_val_results, indent=2)
+            )
+            (afr_dir / "afr_best_params.json").write_text(
+                json.dumps(best_combo, indent=2)
+            )
+            if grid_results:
+                (afr_dir / "afr_grid_results.json").write_text(
+                    json.dumps(grid_results, indent=2)
+                )
+
         if wandb.run:
             wandb.finish()
-            
         return self.tracker.metrics
     
     def run_evaluation_only(self):
@@ -412,8 +572,9 @@ class TrainingRunner:
             
         return eval_results
     
-    def run_validation(self):
+    def run_validation(self, prefix: str | None = None):
         """Run validation/evaluation on all validation datasets"""
+        prefix = prefix if prefix is not None else "val"
         validation_results = {}
         self.model.eval()
         
@@ -453,11 +614,11 @@ class TrainingRunner:
             if wandb.run is not None and "confidence_metrics" in results:
                 confidence_results = results["confidence_metrics"]
                 wandb.log({
-                    f"val/{dataset_name}/target_confidence_mean": confidence_results["target_confidence"]["mean"],
-                    f"val/{dataset_name}/target_confidence_std": confidence_results["target_confidence"]["std"],
-                    f"val/{dataset_name}/logit_diff_mean": confidence_results["logit_differences"]["mean"],
-                    f"val/{dataset_name}/logit_diff_std": confidence_results["logit_differences"]["std"],
-                    f"val/{dataset_name}/target_prediction_rate": confidence_results["prediction_stats"]["target_prediction_rate"],
+                    f"{prefix}/{dataset_name}/target_confidence_mean": confidence_results["target_confidence"]["mean"],
+                    f"{prefix}/{dataset_name}/target_confidence_std": confidence_results["target_confidence"]["std"],
+                    f"{prefix}/{dataset_name}/logit_diff_mean": confidence_results["logit_differences"]["mean"],
+                    f"{prefix}/{dataset_name}/logit_diff_std": confidence_results["logit_differences"]["std"],
+                    f"{prefix}/{dataset_name}/target_prediction_rate": confidence_results["prediction_stats"]["target_prediction_rate"],
                 })
             
             # Log hidden similarities to wandb if available
@@ -466,14 +627,14 @@ class TrainingRunner:
                 if "hidden_similarities" in similarity_results:  # Check for valid results (not error)
                     sim_stats = similarity_results["hidden_similarities"]
                     wandb.log({
-                        f"val/{dataset_name}/hidden_similarity_mean": sim_stats["mean"],
-                        f"val/{dataset_name}/hidden_similarity_std": sim_stats["std"],
-                        f"val/{dataset_name}/hidden_similarity_median": sim_stats["median"],
-                        f"val/{dataset_name}/hidden_similarity_samples": sim_stats["samples_processed"],
+                        f"{prefix}/{dataset_name}/hidden_similarity_mean": sim_stats["mean"],
+                        f"{prefix}/{dataset_name}/hidden_similarity_std": sim_stats["std"],
+                        f"{prefix}/{dataset_name}/hidden_similarity_median": sim_stats["median"],
+                        f"{prefix}/{dataset_name}/hidden_similarity_samples": sim_stats["samples_processed"],
                     })
 
             if wandb.run is not None:
-                wandb.log({f"val/{dataset_name}/{k}": v for k, v in results.items() 
+                wandb.log({f"{prefix}/{dataset_name}/{k}": v for k, v in results.items() 
                           if not isinstance(v, dict)})  # Skip nested dicts for wandb logging
         
         return validation_results

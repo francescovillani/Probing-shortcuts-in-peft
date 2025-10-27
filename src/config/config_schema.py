@@ -211,6 +211,25 @@ class WandBConfig(BaseModel):
     enabled: bool = Field(True, description="Whether to use WandB logging")
 
 
+class AFRConfig(BaseModel):
+    """Configuration for Automatic Feature Reweighting (AFR)"""
+    enabled: bool = Field(False,description="Whether to enable AFR")
+    data_split_ratio: float = Field(0.8, ge=0.1, le=0.9,description="Proportion of data for Stage 1 (DERM)")
+    gamma: float = Field(1.0,description="Inverse temperature for exp(-gamma * p_true) weighting")
+    lambda_l2: float = Field(0.1,description="L2 penalty strength towards Stage-1 head (0.5 * ||θ-θ0||^2)")
+
+    # --- nuovi campi ---
+    lr: float = Field(1e-3,gt=0,description="Learning rate for AFR head-only stage (usually higher than Stage-1)")
+    epochs: int = Field(200,ge=1,description="Number of epochs for AFR head-only training")
+    cache_embeddings: bool = Field(True,description="If True, cache backbone embeddings on DRW and train head on cached features")
+    embedding_field: Literal["cls", "pooler"] = Field("cls",description='Which embedding to use when caching features: "cls" token or model "pooler" output')
+    save_weights_file: bool = Field(True,description="If True, save computed AFR per-example weights to results/afr_weights.*")
+    patience: int = Field(20,ge=1,description="Early stopping patience for AFR head training")
+    grid_search: bool = Field(True, description="Run AFR grid search before final AFR retrain")
+    param_grid: dict | None = None 
+    hpo_datasets: Dict[str, DatasetConfig] = Field(..., description="Validation/evaluation datasets")
+    hpo_is_hans_index : Optional[int] = Field(None, description="Index of HANS dataset in hpo_datasets if present (for special handling)")
+
 class TrainingConfig(BaseModel):
     """Main training/evaluation configuration"""
     # Model Configuration
@@ -231,6 +250,9 @@ class TrainingConfig(BaseModel):
 
     # MaskTune Configuration
     masktune: Optional[MaskTuneConfig] = Field(default=None, description="MaskTune configuration for shortcut learning mitigation")
+
+    # AFR Configuration
+    afr: Optional[AFRConfig] = Field(default=None, description="Automatic Feature Reweighting (AFR) configuration")
 
     # Differential Privacy Configuration
     differential_privacy: Optional[DifferentialPrivacyConfig] = Field(default=None, description="Differential privacy configuration using Opacus")
@@ -279,8 +301,8 @@ class TrainingConfig(BaseModel):
     @field_validator("epochs")
     @classmethod
     def validate_epochs(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError("Epochs must be greater than 0")
+        if v is not None and v < 0:
+            raise ValueError("Epochs must be non-negative")
         return v
     
     @field_validator("train_dataset")
@@ -395,4 +417,4 @@ class SweepConfig(BaseModel):
     def validate_method(cls, v):
         if v != "wandb":
             raise ValueError("Only 'wandb' method is supported")
-        return v 
+        return v

@@ -17,6 +17,7 @@ from .config_schema import (
     MaskTuneConfig,
     DifferentialPrivacyConfig,
     WandBConfig,
+    AFRConfig,
 )
 from .manager import (
     ConfigManager,
@@ -38,6 +39,7 @@ __all__ = [
     'MaskTuneConfig',
     'DifferentialPrivacyConfig',
     'WandBConfig',
+    'AFRConfig',
     
     # Configuration management
     'ConfigManager',
