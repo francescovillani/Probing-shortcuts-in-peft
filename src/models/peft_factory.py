@@ -130,7 +130,7 @@ def log_trainable_parameters(model, method_name: str = "PEFT") -> None:
     logger.debug("=" * 50)
 
 
-def unfreeze_classification_head(base_model, num_labels, peft_args, method_name):
+def unfreeze_classification_head(base_model, peft_args, method_name):
     """
     Unfreeze the classification head and/or specific parameters as requested via peft_args.
 
@@ -139,7 +139,6 @@ def unfreeze_classification_head(base_model, num_labels, peft_args, method_name)
 
     Args:
         base_model: The base model with the classification head
-        num_labels: Expected number of output labels (currently unused)
         peft_args: Dict that may contain:
             - 'heads_to_save': list of classification head module names to unfreeze and later save.
               Only top-level module names are supported for save/load compatibility.
@@ -357,7 +356,6 @@ class PTuningModelFactory(PEFTModelFactory):
         return model
 
 
-# Pfeiffer Adapters (AdapterHub) factory
 class PfeifferAdapterModelFactory(PEFTModelFactory):
     def create_model(self):
         if not ADAPTERS_AVAILABLE:
@@ -369,26 +367,24 @@ class PfeifferAdapterModelFactory(PEFTModelFactory):
             self.model_name, num_labels=self.num_labels
         )
 
-        # Adapter configuration and name
         peft_args = self.peft_args.copy()
         adapter_name = peft_args.pop("adapter_name", "pfeiffer")
-
-
-        # Add and activate adapter
+        
+        peft_args.pop("modules_to_save", None)
+        peft_args.pop("heads_to_save", None) 
+        adapter_config = AdapterConfig.load("pfeiffer", **peft_args)
         adapters.init(base_model)
-        base_model.add_adapter(adapter_name, config="pfeiffer", set_active=True)
+        base_model.add_adapter(adapter_name, config=adapter_config, set_active=True)
         base_model.train_adapter(adapter_name)
 
-        # Remember adapter name for saving
         try:
             setattr(base_model, "trained_adapter_name", adapter_name)
         except Exception:
             pass
 
-        # Optionally unfreeze classification head(s)
         classification_heads_found = (
             unfreeze_classification_head(
-                base_model, self.num_labels, self.peft_args, "Pfeiffer-Adapter"
+                base_model, self.peft_args, "Pfeiffer-Adapter"
             )
         )
         if classification_heads_found:
@@ -422,7 +418,7 @@ class PfeifferAdapterDecoderModelFactory(PEFTModelFactory):
             
             
         reduction_factor = self.peft_args.get("reduction_factor", 16)
-        non_linearity = self.peft_args.get("non_linearity", "gelu")
+        non_linearity = self.peft_args.get("non_linearity", "relu")
         # Add new parameter for adapter location with a default value
         adapter_location = self.peft_args.get("adapter_location", "mlp.down_proj")
 
@@ -450,7 +446,7 @@ class PfeifferAdapterDecoderModelFactory(PEFTModelFactory):
 
         # Unfreeze classification head
         classification_heads_found = unfreeze_classification_head(
-            base_model, self.num_labels, self.peft_args, "Pfeiffer-Adapter"
+            base_model, self.peft_args, "Pfeiffer-Adapter"
         )
         if classification_heads_found:
             base_model.classification_heads_to_save = classification_heads_found
@@ -478,7 +474,7 @@ class BitFitModelFactory(PEFTModelFactory):
 
         classification_heads_found = (
             unfreeze_classification_head(
-                model, self.num_labels, self.peft_args, "BitFit"
+                model, self.peft_args, "BitFit"
             )
         )
         if classification_heads_found:
@@ -526,7 +522,7 @@ class LayerNormTuningModelFactory(PEFTModelFactory):
 
         classification_heads_found = (
             unfreeze_classification_head(
-                model, self.num_labels, self.peft_args, "LayerNorm-Tuning"
+                model, self.peft_args, "LayerNorm-Tuning"
             )
         )
         if classification_heads_found:
@@ -576,7 +572,7 @@ class ClassifierOnlyModelFactory(PEFTModelFactory):
 
         classification_heads_found = (
             unfreeze_classification_head(
-                model, self.num_labels, self.peft_args, "Classifier-only"
+                model, self.peft_args, "Classifier-only"
             )
         )
         if classification_heads_found:

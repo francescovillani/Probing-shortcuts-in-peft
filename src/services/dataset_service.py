@@ -272,137 +272,176 @@ class DatasetService:
     
     def apply_splitting(
         self,
-        dataset: Dataset,
+        dataset: Union[Dataset, DatasetDict],
         train_size: float,
+        val_size: float = 0.0,
         test_size: Optional[float] = None,
         split_seed: int = 42,
         stratify_by: Optional[str] = None
-    ) -> Tuple[Dataset, Dataset]:
+    ) -> Tuple[Dataset, Dataset, Dataset]:
         """
-        Apply deterministic dataset splitting to create train and test splits.
-        
-        This method ensures that the same split is always produced for the same
-        dataset and configuration, making it safe to use for both training and
-        validation datasets that need to be split from the same source.
-        
-        Args:
-            dataset: The dataset to split
-            train_size: Proportion of data for training (0.1 to 0.9)
-            test_size: Proportion of data for testing. If None, calculated as 1 - train_size
-            split_seed: Random seed for reproducible splitting
-            stratify_by: Column name to stratify by (e.g., 'label' for balanced splits)
-            
-        Returns:
-            Tuple of (train_dataset, test_dataset)
+        Applica uno split deterministico (train/val/test) a un Dataset o DatasetDict.
+        - Consente quote pari a 0 (il relativo split sarà un Dataset vuoto).
+        - Deduplica prima dello split usando un hash del contenuto testuale (+ etichetta).
+        - Supporta stratificazione tramite `stratify_by`.
+
+        Parametri:
+            dataset: Dataset o DatasetDict di Hugging Face
+            train_size: quota per il train (>=0)
+            val_size: quota per la validation (>=0)
+            test_size: quota per il test; se None, vale 1 - train_size - val_size
+            split_seed: seed per la riproducibilità
+            stratify_by: nome colonna per la stratificazione
+
+        Ritorna:
+            (train_ds, val_ds, test_ds) come tre Dataset (eventualmente vuoti)
         """
-        # Calculate test_size if not provided
+        # ---- Validazioni quote ----
         if test_size is None:
-            test_size = 1.0 - train_size
-        
-        # Validate proportions
-        if train_size + test_size > 1.0:
-            raise ValueError(f"train_size ({train_size}) + test_size ({test_size}) cannot exceed 1.0")
-        
-        # Handle DatasetDict objects by extracting the appropriate dataset
+            test_size = max(0.0, 1.0 - train_size - val_size)
+
+        for name, v in [("train_size", train_size), ("val_size", val_size), ("test_size", test_size)]:
+            if v < 0.0 or v > 1.0:
+                raise ValueError(f"{name} deve essere in [0,1], ricevuto {v}")
+
+        total = train_size + val_size + test_size
+        if total > 1.0 + 1e-12:  # tolleranza numerica
+            raise ValueError(f"Le quote eccedono 1.0 (train+val+test={total:.4f})")
+        if total < 1.0 - 1e-12:
+            logger.warning(f"Le quote sommano a {total:.4f} < 1.0. Una frazione di dati verrà scartata.")
+
+        # ---- Estrazione del Dataset da un DatasetDict ----
         if isinstance(dataset, DatasetDict):
-            # If it's a DatasetDict, we need to extract the actual dataset
-            # For HuggingFace datasets, we typically want the "train" split
             if "train" in dataset:
                 actual_dataset = dataset["train"]
-                logger.info(f"Extracted 'train' split from DatasetDict with {len(actual_dataset)} samples")
+                logger.info(f"Usata la split 'train' del DatasetDict ({len(actual_dataset)} campioni).")
             else:
-                # If no "train" split, take the first available split
                 split_name = list(dataset.keys())[0]
                 actual_dataset = dataset[split_name]
-                logger.info(f"Extracted '{split_name}' split from DatasetDict with {len(actual_dataset)} samples")
+                logger.info(f"Usata la split '{split_name}' del DatasetDict ({len(actual_dataset)} campioni).")
         else:
             actual_dataset = dataset
-        
-        # Remove duplicates before splitting
+
+        # ---- Deduplicazione contenutistica ----
         initial_size = len(actual_dataset)
-        logger.info(f"Original dataset size before deduplication: {initial_size}")
-        
-        # Create a unique identifier for each sample based on text content only
-        # This approach focuses on content deduplication rather than metadata differences
+        logger.info(f"Dimensione iniziale prima della deduplicazione: {initial_size}")
+
         def create_content_hash(example):
-            # Extract primary text content for deduplication
-            # We focus on the main text fields that determine content similarity
             content_fields = []
-            
-            # Common text field names to check for content
-            text_field_names = ['text', 'clean_content', 'content', 'sentence', 'sentence1', 'sentence2', 
-                              'premise', 'hypothesis', 'question', 'context', 'passage', 'document']
-            
-            # Add values from text fields that exist in this example
-            for field_name in text_field_names:
-                if field_name in example:
-                    value = example[field_name]
-                    if isinstance(value, str) and value.strip():
-                        # Normalize whitespace: strip and collapse multiple spaces/newlines
-                        normalized_value = ' '.join(str(value).split())
-                        content_fields.append(f"{field_name}:{normalized_value}")
-            
-            # If no standard text fields found, include any string fields
+            text_field_names = [
+                'text', 'clean_content', 'content', 'sentence', 'sentence1', 'sentence2',
+                'premise', 'hypothesis', 'question', 'context', 'passage', 'document'
+            ]
+            for fname in text_field_names:
+                if fname in example:
+                    val = example[fname]
+                    if isinstance(val, str) and val.strip():
+                        normalized = ' '.join(val.split())
+                        content_fields.append(f"{fname}:{normalized}")
+
             if not content_fields:
-                for key, value in example.items():
-                    if isinstance(value, str) and value.strip() and key not in ['labels', 'label']:
-                        normalized_value = ' '.join(str(value).split())
-                        content_fields.append(f"{key}:{normalized_value}")
-            
-            # Also include the label to ensure we don't merge samples with different labels
+                for k, v in example.items():
+                    if isinstance(v, str) and v.strip() and k not in ['labels', 'label']:
+                        normalized = ' '.join(v.split())
+                        content_fields.append(f"{k}:{normalized}")
+
             if 'labels' in example:
                 content_fields.append(f"label:{example['labels']}")
             elif 'label' in example:
                 content_fields.append(f"label:{example['label']}")
-            
-            # Create hash from content fields only
+
             content_str = "|".join(sorted(content_fields))
             return {"content_hash": hashlib.sha256(content_str.encode('utf-8')).hexdigest()}
-        
-        # Add hash column to identify duplicates
-        hashed_dataset = actual_dataset.map(create_content_hash)
-        
-        # Get unique hashes and their indices
-        unique_hashes = set()
-        unique_indices = []
-        
-        for idx, example in enumerate(hashed_dataset):
-            content_hash = example["content_hash"]
-            if content_hash not in unique_hashes:
-                unique_hashes.add(content_hash)
-                unique_indices.append(idx)
-        
-        # Select only unique samples
-        actual_dataset = actual_dataset.select(unique_indices)
-        deduplicated_size = len(actual_dataset)
-        duplicates_removed = initial_size - deduplicated_size
-        
-        logger.info(f"Removed {duplicates_removed} duplicate samples")
-        logger.info(f"Dataset size after deduplication: {deduplicated_size}")
-        
-        total_size = len(actual_dataset)
-        train_count = int(total_size * train_size)
-        test_count = int(total_size * test_size)
-        
-        logger.info(f"Splitting deduplicated dataset of {total_size} samples: {train_count} train, {test_count} test")
-        logger.info(f"Split proportions: train={train_size:.2f}, test={test_size:.2f}")
-        logger.info(f"Using split seed: {self.seed}")
-        
-        # Create a deterministic split using the provided seed
-        # We'll use the dataset's built-in train_test_split method for consistency
-        split_datasets = actual_dataset.train_test_split(
-            train_size=train_size,
-            test_size=test_size,
-            seed=self.seed,
-            stratify_by_column=stratify_by
+
+        hashed = actual_dataset.map(create_content_hash, desc="Hashing contenuti per dedup")
+        seen, keep_idx = set(), []
+        for i, ex in enumerate(hashed):
+            h = ex["content_hash"]
+            if h not in seen:
+                seen.add(h)
+                keep_idx.append(i)
+
+        actual_dataset = actual_dataset.select(keep_idx)
+        dedup_size = len(actual_dataset)
+        logger.info(f"Rimossi {initial_size - dedup_size} duplicati. Dimensione dopo dedup: {dedup_size}")
+
+        # Se richiesto stratify_by, controlla che esista
+        if stratify_by is not None and stratify_by not in actual_dataset.column_names:
+            logger.warning(f"Colonna di stratificazione '{stratify_by}' non trovata. Stratificazione disattivata.")
+            stratify_by = None
+
+        # Utility per creare un Dataset vuoto con stesso schema
+        empty_ds = actual_dataset.select([])
+
+        # ---- Gestione casi banali (tutto train, o train+val, ecc.) senza chiamare split con 0 ----
+        # Se val==0 e test==0 -> tutto train
+        if val_size == 0.0 and test_size == 0.0:
+            logger.info("Assegnazione completa al train (val/test vuoti).")
+            return actual_dataset, empty_ds, empty_ds
+
+        # ---- Split in due passaggi per mantenere le proporzioni corrette ----
+        # 1) stacchiamo il test (se >0)
+        remainder = actual_dataset
+        test_ds = empty_ds
+        if test_size > 0.0:
+            try:
+                split1 = remainder.train_test_split(
+                    test_size=test_size,
+                    seed=split_seed,
+                    stratify_by_column=stratify_by
+                )
+            except Exception as e:
+                logger.warning(f"Split test con stratificazione fallito ({e}). Riprovo senza stratificazione.")
+                split1 = remainder.train_test_split(
+                    test_size=test_size,
+                    seed=split_seed
+                )
+            remainder = split1["train"]
+            test_ds = split1["test"]
+
+        # 2) stacchiamo la validation (se >0) dal remainder
+        val_ds = empty_ds
+        train_ds = remainder
+        if val_size > 0.0:
+            # quota di val rispetto al remainder
+            denom = max(1e-12, 1.0 - test_size)
+            rel_val = min(1.0, val_size / denom)
+            if rel_val <= 0.0:
+                logger.info("Quota validation effettiva 0 dopo il primo split; val vuoto.")
+                val_ds = empty_ds
+                train_ds = remainder
+            elif rel_val >= 1.0 - 1e-12:
+                # tutto remainder va a val; train vuoto
+                logger.warning("La quota di validation assorbe tutto il remainder; train vuoto.")
+                val_ds = remainder
+                train_ds = empty_ds
+            else:
+                try:
+                    split2 = remainder.train_test_split(
+                        test_size=rel_val,
+                        seed=split_seed,
+                        stratify_by_column=stratify_by
+                    )
+                except Exception as e:
+                    logger.warning(f"Split val con stratificazione fallito ({e}). Riprovo senza stratificazione.")
+                    split2 = remainder.train_test_split(
+                        test_size=rel_val,
+                        seed=split_seed
+                    )
+                train_ds = split2["train"]
+                val_ds = split2["test"]
+
+        # ---- Log finale ----
+        n_tr, n_va, n_te = len(train_ds), len(val_ds), len(test_ds)
+        n_tot = len(actual_dataset)
+        logger.info(
+            f"Split completato su {n_tot} campioni: "
+            f"train={n_tr} ({n_tr/n_tot if n_tot else 0:.3f}), "
+            f"val={n_va} ({n_va/n_tot if n_tot else 0:.3f}), "
+            f"test={n_te} ({n_te/n_tot if n_tot else 0:.3f}); seed={split_seed}"
         )
-        
-        train_dataset = split_datasets["train"]
-        test_dataset = split_datasets["test"]
-        
-        logger.info(f"Successfully split dataset: {len(train_dataset)} train samples, {len(test_dataset)} test samples")
-        
-        return train_dataset, test_dataset
+
+        return train_ds, val_ds, test_ds
     
     def apply_prompting(
         self,
@@ -457,84 +496,85 @@ class DatasetService:
         
         return prompted_dataset
     
-    def create_split_datasets(
-        self,
-        base_config: DatasetConfig,
-        train_config: Optional[DatasetConfig] = None,
-        test_config: Optional[DatasetConfig] = None
-    ) -> Tuple[Dataset, Dataset]:
-        """
-        Create coordinated train and test datasets from the same source dataset.
+    # def create_split_datasets(
+    #     self,
+    #     base_config: DatasetConfig,
+    #     train_config: Optional[DatasetConfig] = None,
+    #     test_config: Optional[DatasetConfig] = None,
+    # ) -> Tuple[Dataset, Dataset]:
+    #     """
+    #     Create coordinated train, val and test datasets from the same source dataset.
         
-        This method ensures that both datasets are split from the same source using
-        the same splitting configuration, guaranteeing consistency.
+    #     This method ensures that both datasets are split from the same source using
+    #     the same splitting configuration, guaranteeing consistency.
         
-        Args:
-            base_config: Base dataset configuration with splitting enabled
-            train_config: Optional override config for training dataset (batch_size, poisoning, etc.)
-            test_config: Optional override config for test dataset (batch_size, poisoning, etc.)
+    #     Args:
+    #         base_config: Base dataset configuration with splitting enabled
+    #         train_config: Optional override config for training dataset (batch_size, poisoning, etc.)
+    #         test_config: Optional override config for test dataset (batch_size, poisoning, etc.)
             
-        Returns:
-            Tuple of (train_dataset, test_dataset)
+    #     Returns:
+    #         Tuple of (train_dataset, test_dataset)
             
-        Raises:
-            ValueError: If base_config doesn't have splitting enabled
-        """
-        if not base_config.splitting or not base_config.splitting.enabled:
-            raise ValueError("Base config must have splitting enabled")
+    #     Raises:
+    #         ValueError: If base_config doesn't have splitting enabled
+    #     """
+    #     if not base_config.splitting or not base_config.splitting.enabled:
+    #         raise ValueError("Base config must have splitting enabled")
         
-        logger.info(f"Creating coordinated train/test splits from dataset: {base_config.name}")
+    #     logger.info(f"Creating coordinated train/test splits from dataset: {base_config.name}")
         
-        base_dataset = self._load_dataset(base_config.model_dump())
+    #     base_dataset = self._load_dataset(base_config.model_dump())
         
-        # Apply splitting to get train and test datasets
-        train_dataset, test_dataset = self.apply_splitting(
-            dataset=base_dataset,
-            train_size=base_config.splitting.train_size,
-            test_size=base_config.splitting.test_size,
-            split_seed=self.seed,
-            stratify_by=base_config.splitting.stratify_by
-        )
+    #     # Apply splitting to get train and test datasets
+    #     train_dataset, val_dataset, test_dataset = self.apply_splitting(
+    #         dataset=base_dataset,
+    #         train_size=base_config.splitting.train_size,
+    #         val_size=base_config.splitting.val_size,
+    #         test_size=base_config.splitting.test_size,
+    #         split_seed=self.seed,
+    #         stratify_by=base_config.splitting.stratify_by
+    #     )
         
-        # Apply any train-specific configurations
-        if train_config:
-            if train_config.poisoning and train_config.poisoning.enabled:
-                logger.info("Applying poisoning to training dataset")
-                poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
-                train_dataset = self.apply_poisoning(
-                    dataset=train_dataset,
-                    prompt_config=train_config,  # Pass prompt config for length calculations
-                    **poison_params
-                )
+    #     # Apply any train-specific configurations
+    #     if train_config:
+    #         if train_config.poisoning and train_config.poisoning.enabled:
+    #             logger.info("Applying poisoning to training dataset")
+    #             poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
+    #             train_dataset = self.apply_poisoning(
+    #                 dataset=train_dataset,
+    #                 prompt_config=train_config,  # Pass prompt config for length calculations
+    #                 **poison_params
+    #             )
             
-            if train_config.prompting and train_config.prompting.enabled:
-                logger.info("Applying prompting to training dataset")
-                train_dataset = self.apply_prompting(
-                    dataset=train_dataset,
-                    config=train_config
-                )
+    #         if train_config.prompting and train_config.prompting.enabled:
+    #             logger.info("Applying prompting to training dataset")
+    #             train_dataset = self.apply_prompting(
+    #                 dataset=train_dataset,
+    #                 config=train_config
+    #             )
         
-        # Apply any test-specific configurations
-        if test_config:
-            if test_config.poisoning and test_config.poisoning.enabled:
-                logger.info("Applying poisoning to test dataset")
-                poison_params = test_config.poisoning.model_dump(exclude={'enabled'})
-                test_dataset = self.apply_poisoning(
-                    dataset=test_dataset,
-                    prompt_config=test_config,  # Pass prompt config for length calculations
-                    **poison_params
-                )
+    #     # Apply any test-specific configurations
+    #     if test_config:
+    #         if test_config.poisoning and test_config.poisoning.enabled:
+    #             logger.info("Applying poisoning to test dataset")
+    #             poison_params = test_config.poisoning.model_dump(exclude={'enabled'})
+    #             test_dataset = self.apply_poisoning(
+    #                 dataset=test_dataset,
+    #                 prompt_config=test_config,  # Pass prompt config for length calculations
+    #                 **poison_params
+    #             )
             
-            if test_config.prompting and test_config.prompting.enabled:
-                logger.info("Applying prompting to test dataset")
-                test_dataset = self.apply_prompting(
-                    dataset=test_dataset,
-                    config=test_config
-                )
+    #         if test_config.prompting and test_config.prompting.enabled:
+    #             logger.info("Applying prompting to test dataset")
+    #             test_dataset = self.apply_prompting(
+    #                 dataset=test_dataset,
+    #                 config=test_config
+    #             )
         
-        logger.info(f"Successfully created coordinated splits: {len(train_dataset)} train, {len(test_dataset)} test")
+    #     logger.info(f"Successfully created coordinated splits: {len(train_dataset)} train, {len(test_dataset)} test")
         
-        return train_dataset, test_dataset
+    #     return train_dataset, val_dataset, test_dataset
     
     def save_dataset(self, dataset: Dataset, path: str) -> None:
         """Save dataset to disk."""
@@ -779,7 +819,7 @@ class DatasetService:
             # Create training dataloader
             train_loader = DataLoader(
                 train_dataset,
-                batch_size=train_config.batch_size,
+                batch_size=train_config.logical_batch_size if train_config.logical_batch_size else train_config.batch_size,
                 shuffle=True
             )
             logger.info(f"Created training dataloader with batch size {train_config.batch_size}")
@@ -871,9 +911,10 @@ class DatasetService:
             base_dataset = dataset
             
             # Apply splitting to get train and test datasets
-            train_dataset, test_dataset = self.apply_splitting(
+            train_dataset, val_dataset, test_dataset = self.apply_splitting(
                 dataset=base_dataset,
                 train_size=config_obj.splitting.train_size,
+                val_size=config_obj.splitting.val_size,
                 test_size=config_obj.splitting.test_size,
                 split_seed=self.seed,
                 stratify_by=config_obj.splitting.stratify_by
@@ -884,6 +925,8 @@ class DatasetService:
                 return train_dataset
             elif config_obj.splitting.split == "test":
                 return test_dataset
+            elif config_obj.splitting.split == "validation":
+                return val_dataset
             else:
                 # If no specific split requested, return the train split by default
                 logger.info("No specific split requested, returning train split by default")
@@ -904,7 +947,8 @@ class DatasetService:
         self, 
         dataset: Dataset, 
         text_field: Union[str, List[str]],
-        label_field: str
+        label_field: str,
+        keep_columns: Optional[List[str]] = None,   # <--- NEW
     ) -> Dataset:
         """Process dataset with tokenization and formatting."""
         # Get the appropriate loader for tokenization
@@ -926,13 +970,13 @@ class DatasetService:
             actual_text_field = "prompted_text"
             logger.info("Using prompted_text field for tokenization in decoder model")
         
-        # Tokenize using the appropriate loader
+        # Tokenize
         dataset = dataset.map(
             lambda batch: loader.tokenize(batch, actual_text_field),
             batched=True
         )
         
-        # Rename label field if needed and if 'labels' doesn't already exist
+        # Rename label field if needed (senza perdere la colonna "labels")
         if label_field in dataset.column_names and label_field != "labels" and "labels" not in dataset.column_names:
             dataset = dataset.rename_column(label_field, "labels")
         
@@ -940,24 +984,22 @@ class DatasetService:
         if trigger_config is not None:
             dataset.trigger_config = trigger_config
             
-        # Convert string labels to numeric values for MNLI
+        # Convert string labels to numeric values for MNLI (senza rimuovere "labels")
         if "labels" in dataset.column_names and isinstance(dataset["labels"][0], str):
-            label_map = {
-                "entailment": 0,
-                "neutral": 1,
-                "contradiction": 2
-            }
+            label_map = {"entailment": 0, "neutral": 1, "contradiction": 2}
             dataset = dataset.map(
                 lambda example: {"labels": label_map[example["labels"]]},
-                remove_columns=["labels"]
+                # NOTA: non rimuovere "labels", la stiamo sovrascrivendo
             )
-            
-        # Set format for PyTorch
-        dataset.set_format(
-            "torch",
-            columns=["input_ids", "attention_mask", "labels"]
-        )
         
+        # --- NEW: costruiamo la lista colonne per torch, includendo eventuali keep_columns presenti
+        cols = ["input_ids", "attention_mask", "labels"]
+        if keep_columns:
+            for c in keep_columns:
+                if c in dataset.column_names and c not in cols:
+                    cols.append(c)
+        
+        dataset.set_format("torch", columns=cols)
         return dataset
 
     def _inject_trigger_into_dataset(

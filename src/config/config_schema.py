@@ -62,11 +62,13 @@ class PoisoningConfig(BaseModel):
 class SplittingConfig(BaseModel):
     """Configuration for dataset splitting"""
     enabled: bool = Field(False, description="Whether to apply dataset splitting")
-    train_size: float = Field(0.8, ge=0.1, le=0.9, description="Proportion of data to use for training (0.1 to 0.9)")
-    test_size: Optional[float] = Field(None, ge=0.1, le=0.9, description="Proportion of data to use for testing. If None, calculated as 1 - train_size")
+    train_size: float = Field(0.8, ge=0, description="Proportion of data to use for training (0.1 to 0.9)")
+    test_size: Optional[float] = Field(0.1, ge=0, description="Proportion of data to use for testing.")
+    val_size: Optional[float] = Field(0.1, ge=0, description="Proportion of data to use for validation.")
+    
     split_seed: int = Field(42, description="Random seed for reproducible splitting")
     stratify_by: Optional[str] = Field(None, description="Column name to stratify the split by (e.g., 'label' for balanced splits)")
-    split: Optional[Literal["train", "test"]] = Field(None, description="Split to use")
+    split: Optional[Literal["train", "test", "validation"]] = Field(None, description="Split to use")
     
     @field_validator("test_size")
     @classmethod
@@ -129,6 +131,7 @@ class DifferentialPrivacyConfig(BaseModel):
     noise_multiplier: float = Field(1.0, ge=0, description="Noise multiplier for differential privacy")
     max_grad_norm: float = Field(1.0, ge=0, description="Maximum gradient norm for clipping")
     grad_sample_mode: Literal["hooks", "ghost"] = Field("hooks", description="Gradient sampling mode for Opacus")
+    target_delta: Optional[float] = Field(None, ge=0, description="Target delta for differential privacy")
     
     @field_validator("noise_multiplier")
     @classmethod
@@ -167,6 +170,7 @@ class DatasetConfig(BaseModel):
     config: Optional[str] = Field(None, description="Dataset configuration name")
     dataset_type: str = Field("hf", description="Dataset type (hf, local, or custom loader name)")
     batch_size: int = Field(..., description="Batch size")
+    logical_batch_size: Optional[int] = Field(None, description="Logical batch size for gradient accumulation (if different from batch_size)")
     split: Optional[str] = Field(None, description="Dataset split to use")
     text_field: Optional[Union[str, List[str]]] = Field(None, description="Text field(s) to use. Single field for simple datasets, list for multi-field datasets like MNLI")
     label_field: Optional[str] = Field(None, description="Label field to use")

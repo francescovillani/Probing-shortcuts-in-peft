@@ -513,10 +513,20 @@ class MaskingService:
         debug_dir = output_dir / "masking_debug"
         debug_dir.mkdir(exist_ok=True)
         
-        # Save detailed debug samples
+        # Save detailed debug samples with filtered token analysis
         debug_file = debug_dir / "masking_debug_samples.json"
+        filtered_debug_samples = []
+        for sample in self.debug_samples:
+            filtered_sample = sample.copy()
+            # Filter out protected tokens from token analysis
+            filtered_sample["token_analysis"] = [
+            token for token in sample["token_analysis"] 
+            if not token["is_protected"]
+            ]
+            filtered_debug_samples.append(filtered_sample)
+            
         with open(debug_file, 'w') as f:
-            json.dump(self.debug_samples, f, indent=2)
+            json.dump(filtered_debug_samples, f, indent=2)
         
         # Create summary statistics
         summary = self._create_debug_summary(strategy, threshold_multiplier, top_k)

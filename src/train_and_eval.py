@@ -207,31 +207,12 @@ class TrainingRunner:
                 wandb.config.update({"differential_privacy_config": dp_config_dict})
             self.tracker.metrics["config"]["differential_privacy_config"] = dp_config_dict
         
-        # Model - for evaluation-only mode, load from checkpoint
-        if self.is_evaluation_only:
-            if not self.config.model.checkpoints_dir:
-                raise ValueError("For evaluation-only mode, model.checkpoints_dir must be specified")
-            
-            # Get checkpoint paths and use the latest one if multiple are available
-            checkpoint_paths = self.model_service.get_checkpoint_paths(self.config.model.checkpoints_dir)
-            if not checkpoint_paths:
-                raise ValueError(f"No checkpoints found in {self.config.model.checkpoints_dir}")
-            
-            # Use the last checkpoint (highest epoch number)
-            checkpoint_path = checkpoint_paths[-1]
-            self.logger.info(f"Loading model from checkpoint: {checkpoint_path}")
-            
-            self.model = self.model_service.load_checkpoint(
-                checkpoint_path=checkpoint_path,
-                num_labels=self.config.num_labels,
-                base_model=self.config.model.base_model
-            )
-        else:
-            # Training mode - create fresh model
-            self.model = self.model_service.create_model(
-                config=self.config.model,
-                num_labels=self.config.num_labels
-            )
+
+        # Training mode - create fresh model
+        self.model = self.model_service.create_model(
+            config=self.config.model,
+            num_labels=self.config.num_labels
+        )
         
         # Configure model to use the pad token (important for generative models)
         if hasattr(self.model.config, 'pad_token_id') and self.model.config.pad_token_id is None:
@@ -290,6 +271,7 @@ class TrainingRunner:
                 noise_multiplier=dp_config.noise_multiplier,
                 max_grad_norm=dp_config.max_grad_norm,
                 grad_sample_mode=dp_config.grad_sample_mode,
+                target_delta=dp_config.target_delta,
             )
             
             self.logger.info(f"Differential privacy enabled with noise_multiplier={dp_config.noise_multiplier}, max_grad_norm={dp_config.max_grad_norm}")
@@ -373,25 +355,7 @@ class TrainingRunner:
                 self.save_checkpoint(epoch)
             if self.config.save_strategy == "final" and epoch == self.config.epochs - 1:
                 self.save_checkpoint(epoch)
-            
-            # Log privacy budget information if differential privacy is enabled
-            privacy_budget = None
-            if self.privacy_engine is not None and hasattr(self.privacy_engine, 'get_privacy_spent'):
-                try:
-                    epsilon, delta = self.privacy_engine.get_privacy_spent()
-                    self.logger.info(f"Epoch {epoch + 1} - Privacy budget: ε={epsilon:.2f}, δ={delta}")
-                    privacy_budget = {"epsilon": epsilon, "delta": delta}
-                    
-                    # Log to wandb if available
-                    if wandb.run is not None:
-                        wandb.log({
-                            "privacy/epsilon": epsilon,
-                            "privacy/delta": delta,
-                            "epoch": epoch + 1
-                        })
-                except Exception as e:
-                    self.logger.warning(f"Failed to get privacy budget: {e}")
-            
+                        
             # Update metrics
             epoch_time = time.time() - epoch_start_time
             self.tracker.add_epoch_metrics(
@@ -399,8 +363,7 @@ class TrainingRunner:
                 train_loss=train_loss,
                 learning_rate=self.lr_scheduler.get_last_lr()[0],
                 epoch_time=epoch_time,
-                validation_results=validation_results,
-                privacy_budget=privacy_budget
+                validation_results=validation_results
             )
             
         # Save final results
@@ -433,11 +396,11 @@ class TrainingRunner:
         }
         
         # For evaluation-only mode, save results in the checkpoint directory for easy association
-        checkpoint_dir = Path(self.config.model.checkpoints_dir)
-        results_file = checkpoint_dir / "evaluation_results.json"
+        outputdirectory = self.output_dir
+        results_file = outputdirectory / "evaluation_results.json"
         
         # Ensure the checkpoint directory exists
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        outputdirectory.mkdir(parents=True, exist_ok=True)
         
         with open(results_file, 'w') as f:
             json.dump(eval_results, f, indent=2)

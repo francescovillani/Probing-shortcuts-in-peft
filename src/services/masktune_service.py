@@ -187,7 +187,7 @@ class MaskTuneService:
         with open(self.output_dir / "masking_stats.json", "w") as f:
             json.dump({
                 "masking_stats": masking_stats,
-                "debug_samples": self.masking_service.debug_samples
+                # "debug_samples": self.masking_service.debug_samples
             }, f, indent=4)
 
         
