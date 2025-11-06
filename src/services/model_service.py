@@ -4,7 +4,7 @@ Model service for unified model operations.
 This service handles model creation, PEFT configuration, checkpoint management,
 and model metadata tracking.
 """
-
+from opacus.grad_sample import GradSampleModule
 import torch
 import logging
 import sys
@@ -179,6 +179,10 @@ class ModelService:
         checkpoint_path.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Saving model checkpoint to: {checkpoint_path}")
+                
+        if isinstance(model, GradSampleModule):
+            # If model is wrapped in GradSampleModule, extract the underlying model
+            model = model._module
         
         # Save model (regular and PEFT models)
         model.save_pretrained(checkpoint_path)
