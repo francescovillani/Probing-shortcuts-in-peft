@@ -102,7 +102,7 @@ class MaskTuneConfig(BaseModel):
     
     # Save options
     save_datasets: bool = Field(False, description="Whether to save masked datasets")
-    
+    max_samples: Optional[int] = Field(None, description="Number of samples in the final masktune training set")
     # Debug options for masking visualization
     extract_masking_debug_samples: bool = Field(True, description="Whether to extract debug samples showing masking process")
     num_masking_debug_samples: int = Field(10, ge=1, le=50, description="Number of debug samples to extract for masking visualization")
@@ -323,7 +323,7 @@ class TrainingConfig(BaseModel):
     @classmethod
     def validate_learning_rate(cls, v, info):
         # Only validate if epochs is also set (training mode)
-        if v is not None and (v <= 0 or v >= 1):
+        if v is not None and (v < 0 or v >= 1):
             raise ValueError("Learning rate must be between 0 and 1")
         return v
 

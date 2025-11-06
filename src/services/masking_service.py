@@ -141,100 +141,125 @@ class MaskingService:
         label_column: str = "label",
         batch_size: int = 32,
         max_length: int = 512,
-        cache_dir: Optional[Path] = "saliency_cache",
-        cache_name: str = "saliency_scores.pt"
-    ) -> List[torch.Tensor]:
+        pair_mode: str = "text_pair",    # "text_pair" (consigliato) | "concat"
+    ):
         """
-        Compute saliency scores for an entire dataset in an efficient batched manner.
-        
-        Args:
-            dataset: Dataset to compute saliency for
-            text_columns: List of text column names to process
-            label_column: Name of the label column
-            batch_size: Batch size for processing
-            max_length: Maximum sequence length
-            cache_dir: Directory to cache saliency scores
-            cache_name: Name of the cache file
-            
-        Returns:
-            List of saliency score tensors, one per sample
+        Calcola saliency su tutto il dataset in batch e RITORNA anche i token.
+        Ritorno:
+            {
+            "saliency": Tensor [N, L] (float32, CPU),
+            "input_ids": Tensor [N, L] (int64, CPU),
+            "attention_mask": Tensor [N, L] (int64, CPU)
+            }
         """
-        # Check if cached scores exist
-        # if cache_dir is not None:
-        #     cache_path = Path(cache_dir) / cache_name
-        #     if cache_path.exists():
-        #         logger.info(f"Loading cached saliency scores from {cache_path}")
-        #         try:
-        #             scores = torch.load(cache_path)
-        #             if len(scores) == len(dataset):  # Verify cache matches dataset size
-        #                 logger.info("Using cached saliency scores")
-        #                 return scores
-        #             else:
-        #                 logger.warning("Cache size mismatch - recomputing scores")
-        #         except Exception as e:
-        #             logger.warning(f"Failed to load cache: {e}. Computing scores from scratch.")
+        import torch
+        from tqdm import tqdm
 
-        logger.info(f"Computing saliency scores for {len(dataset)} samples")
-        
-        all_saliency_scores = []
-        
-        # Prepare tokenization function
-        def tokenize_batch(batch):
-            if len(text_columns) == 1:
-                texts = batch[text_columns[0]]
+        logger.info(f"Computing saliency scores for {len(dataset)} samples (pair_mode={pair_mode})")
+
+        # ---------- tokenizer stabile ----------
+        def _norm(x):
+            s = "" if x is None else str(x)
+            return " ".join(s.split())
+
+        def tokenize_batch(batch, *, text_columns, tokenizer, max_length: int, pair_mode: str):
+            if isinstance(text_columns, (list, tuple)) and len(text_columns) == 2:
+                c1, c2 = text_columns
+                a = [_norm(x) for x in batch[c1]]
+                b = [_norm(x) for x in batch[c2]]
+                if pair_mode == "text_pair":
+                    return tokenizer(
+                        a, b,
+                        truncation=True, padding="max_length",
+                        max_length=max_length,
+                        return_overflowing_tokens=False,
+                        return_tensors="pt",
+                    )
+                elif pair_mode == "concat":
+                    seqs = [f"{x} {y}".strip() for x, y in zip(a, b)]
+                    return tokenizer(
+                        seqs,
+                        truncation=True, padding="max_length",
+                        max_length=max_length,
+                        return_overflowing_tokens=False,
+                        return_tensors="pt",
+                    )
+                else:
+                    raise ValueError(f"pair_mode sconosciuto: {pair_mode}")
+
+            # 1 colonna o >=3 colonne (concat deterministica)
+            if isinstance(text_columns, (list, tuple)) and len(text_columns) == 1:
+                texts = [_norm(t) for t in batch[text_columns[0]]]
+            elif isinstance(text_columns, str):
+                texts = [_norm(t) for t in batch[text_columns]]
             else:
-                texts = []
-                for i in range(len(batch[text_columns[0]])):
-                    combined_text = " ".join([
-                        str(batch[col][i]) for col in text_columns
-                    ])
-                    texts.append(combined_text)
-            
-            return self.tokenizer(
+                cols = list(text_columns)
+                n = len(batch[cols[0]])
+                texts = [" ".join(_norm(batch[c][i]) for c in cols) for i in range(n)]
+
+            return tokenizer(
                 texts,
-                truncation=True,
-                padding="max_length",
+                truncation=True, padding="max_length",
                 max_length=max_length,
-                return_tensors="pt"
+                return_overflowing_tokens=False,
+                return_tensors="pt",
             )
-        
-        # Process in batches
-        for i in tqdm(range(0, len(dataset), batch_size), desc="Computing saliency"):
-            batch_end = min(i + batch_size, len(dataset))
-            batch = dataset[i:batch_end]
-            
-            # Tokenize batch
-            tokenized = tokenize_batch(batch)
-            input_ids = tokenized["input_ids"]
-            attention_mask = tokenized["attention_mask"]
-            
-            # Get labels
-            if isinstance(batch[label_column], list):
-                labels = torch.tensor(batch[label_column])
+        # ---------------------------------------
+
+        # Scegli colonna etichette effettiva
+        eff_label_col = label_column
+        if eff_label_col not in dataset.column_names and "labels" in dataset.column_names:
+            eff_label_col = "labels"
+
+        # Accumulatori (CPU)
+        saliency_parts = []
+        ids_parts = []
+        mask_parts = []
+
+        # Loop batched
+        for start in tqdm(range(0, len(dataset), batch_size), desc="Computing saliency"):
+            end = min(start + batch_size, len(dataset))
+            batch = dataset[start:end]  # dict di liste
+
+            # Tokenize (CPU tensors)
+            tokenized = tokenize_batch(
+                batch,
+                text_columns=text_columns,
+                tokenizer=self.tokenizer,
+                max_length=max_length,
+                pair_mode=pair_mode,
+            )
+            input_ids = tokenized["input_ids"]           # [B, L], int64 CPU
+            attention_mask = tokenized["attention_mask"] # [B, L], int64 CPU
+
+            # Labels
+            if eff_label_col in batch:
+                labels_list = batch[eff_label_col]
             else:
-                labels = torch.tensor([batch[label_column]])
-            
-            # Compute saliency scores for this batch
-            batch_saliency = self.compute_saliency_scores(
-                input_ids, attention_mask, labels
-            )
-            
-            # Store individual saliency tensors
-            for j in range(batch_saliency.size(0)):
-                all_saliency_scores.append(batch_saliency[j].cpu())
-        
-        # Cache the scores if cache_dir is provided
-        if cache_dir is not None:
-            cache_dir = Path(cache_dir)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path = cache_dir / cache_name
-            logger.info(f"Caching saliency scores to {cache_path}")
-            try:
-                torch.save(all_saliency_scores, cache_path)
-            except Exception as e:
-                logger.warning(f"Failed to cache saliency scores: {e}")
-        
-        return all_saliency_scores
+                raise KeyError(f"Label column '{label_column}' (o 'labels') non trovata nel batch")
+            labels = torch.as_tensor(labels_list)  # [B]
+
+            # ---- Saliency (lascia grad abilitato se serve) ----
+            batch_saliency = self.compute_saliency_scores(input_ids, attention_mask, labels)
+            # atteso [B, L] float
+
+            # Accumula su CPU
+            saliency_parts.append(batch_saliency.detach().cpu().to(torch.float32))
+            ids_parts.append(input_ids.cpu().to(torch.int64))
+            mask_parts.append(attention_mask.cpu().to(torch.int64))
+
+        # Concat finale
+        saliency_all = torch.cat(saliency_parts, dim=0)      # [N, L]
+        input_ids_all = torch.cat(ids_parts, dim=0)          # [N, L]
+        attention_all = torch.cat(mask_parts, dim=0)         # [N, L]
+
+        assert saliency_all.shape[0] == input_ids_all.shape[0] == attention_all.shape[0] == len(dataset)
+
+        return {
+            "saliency": saliency_all,
+            "input_ids": input_ids_all,
+            "attention_mask": attention_all,
+        }
     
     def identify_tokens_to_mask(
         self,
@@ -669,93 +694,75 @@ class MaskingService:
         extract_debug_samples: bool = True,
         num_debug_samples: int = 10,
         save_debug_visualizations: bool = True,
-        output_dir: Optional[Path] = None
+        output_dir: Optional[Path] = None,
+        # --- NUOVO ---
+        masked_text_column: str = "text_masked",
+        max_samples: Optional[int] = None,
+        sample_strategy: str = "even",  # "first" | "even" | "random"
+        sample_seed: int = 42,
+        reuse_tokenization: bool = True  # prova a riusare la tokenizzazione della saliency
     ) -> Dataset:
         """
         Create a masked version of the dataset using saliency-based masking.
-        
-        Args:
-            dataset: Input dataset to mask
-            text_columns: List of text column names to process
-            label_column: Name of the label column
-            batch_size: Batch size for processing (increased default for efficiency)
-            masking_strategy: Strategy for selecting tokens to mask
-            threshold_multiplier: Multiplier for threshold strategy
-            top_k: Number of top tokens to mask for top_k strategy
-            max_length: Maximum sequence length
-            extract_debug_samples: Whether to extract debug samples
-            num_debug_samples: Number of debug samples to extract
-            save_debug_visualizations: Whether to save debug visualizations
-            output_dir: Output directory for saving debug visualizations
-            
-        Returns:
-            New dataset with masked text columns
+        - Se più colonne di testo sono fornite, vengono concatenate SOLO ai fini del masking,
+        e il risultato viene scritto in `masked_text_column` per non rompere lo schema originale.
         """
+        import numpy as np
         logger.info(f"Creating masked dataset with {len(dataset)} samples")
-        
+
         # Clear previous debug samples
         self.debug_samples = []
-        
-        # Step 1: Compute all saliency scores efficiently
-        all_saliency_scores = self.compute_saliency_scores_batched(
+
+        # 1) Saliency (e, se possibile, tokenization coerente)
+        saliency_out = self.compute_saliency_scores_batched(
             dataset, text_columns, label_column, batch_size, max_length
         )
-        
-        # Step 2: Process dataset efficiently with precomputed saliency scores
-        masked_data = []
+        # Permettiamo che compute_saliency_scores_batched ritorni anche i tokenizzati
+        # ad es.: dict con 'saliency': Tensor[N, L], 'input_ids': Tensor[N, L], 'attention_mask': Tensor[N, L]
+        if isinstance(saliency_out, dict):
+            all_saliency_scores = saliency_out["saliency"]
+            pre_tokenized_input_ids = saliency_out.get("input_ids", None)
+            pre_tokenized_attention = saliency_out.get("attention_mask", None)
+        else:
+            all_saliency_scores = saliency_out
+            pre_tokenized_input_ids = None
+            pre_tokenized_attention = None
+
+        assert len(all_saliency_scores) == len(dataset), "Saliency/dataset length mismatch"
+
+        # 2) Indici debug
         debug_sample_indices = []
-        
-        # Select indices for debug samples (evenly distributed)
         if extract_debug_samples and num_debug_samples > 0:
             step = max(1, len(dataset) // num_debug_samples)
             debug_sample_indices = list(range(0, len(dataset), step))[:num_debug_samples]
             logger.info(f"Will collect debug samples for indices: {debug_sample_indices}")
-        
-        def tokenize_single(text_list):
-            if len(text_columns) == 1:
-                texts = text_list
-            else:
-                texts = [" ".join([str(text_list[i]) for i in range(len(text_columns))])]
-            
-            return self.tokenizer(
-                texts,
-                truncation=True,
-                padding="max_length", 
-                max_length=max_length,
-                return_tensors="pt"
-            )
-        
+
+        # 3) Costanti fuori dal loop
+        device = torch.device("cpu") if (
+            pre_tokenized_input_ids is None or not torch.is_tensor(pre_tokenized_input_ids)
+        ) else pre_tokenized_input_ids.device
+        special_ids_tensor = torch.tensor(self.tokenizer.all_special_ids, device=device)
+
+        masked_data = []
+
         logger.info("Applying masking to samples")
         for i in tqdm(range(len(dataset)), desc="Masking samples"):
             sample = dataset[i]
-            saliency_scores = all_saliency_scores[i].unsqueeze(0)  # Add batch dimension
-            
-            # Tokenize current sample
-            if len(text_columns) == 1:
-                texts = [sample[text_columns[0]]]
-            else:
-                combined_text = " ".join([str(sample[col]) for col in text_columns])
-                texts = [combined_text]
-            
-            tokenized = self.tokenizer(
-                texts,
-                truncation=True,
-                padding="max_length",
-                max_length=max_length,
-                return_tensors="pt"
-            )
-            
-            input_ids = tokenized["input_ids"]
-            attention_mask = tokenized["attention_mask"]
-            
-            special_token_ids = set(self.tokenizer.all_special_ids)
-            special_token_mask = torch.isin(
-                input_ids, 
-                torch.tensor(list(special_token_ids), device=input_ids.device)
-            )
-            saliency_scores.masked_fill_(special_token_mask, -float('inf'))
-            
-            # Identify tokens to mask
+            saliency_scores = all_saliency_scores[i].unsqueeze(0)  # [1, L]
+
+            # Tokenizzazione coerente
+            input_ids = pre_tokenized_input_ids[i].unsqueeze(0)       # [1, L]
+            attention_mask = pre_tokenized_attention[i].unsqueeze(0)  # [1, L]
+
+            special_ids_local = special_ids_tensor.to(input_ids.device)
+
+            special_token_mask = torch.isin(input_ids, special_ids_local) | (attention_mask == 0)
+
+            saliency_scores = saliency_scores.to(device=input_ids.device, dtype=torch.float32)
+
+            fill_val = torch.finfo(saliency_scores.dtype).min
+            saliency_scores.masked_fill_(special_token_mask, fill_val)
+            # Selezione indici da mascherare
             mask_indices = self.identify_tokens_to_mask(
                 saliency_scores,
                 input_ids,
@@ -764,13 +771,13 @@ class MaskingService:
                 threshold_multiplier=threshold_multiplier,
                 top_k=top_k
             )
-            
-            # Apply masking
+
+            # Applica masking
             masked_input_ids = self.apply_masking(input_ids, mask_indices)
-            
-            # Collect debug information if this sample is selected
+
+            # Debug
             if extract_debug_samples and i in debug_sample_indices:
-                debug_info = self.create_debug_visualization(
+                dbg = self.create_debug_visualization(
                     sample=sample,
                     text_columns=text_columns,
                     input_ids=input_ids,
@@ -780,28 +787,24 @@ class MaskingService:
                     masked_input_ids=masked_input_ids,
                     sample_idx=i
                 )
-                self.debug_samples.append(debug_info)
-                
-                # Log debug info for the first few samples
+                self.debug_samples.append(dbg)
                 if len(self.debug_samples) <= 3:
-                    logger.info(f"Debug sample {i}: {debug_info['masking_summary']}")
-                    logger.info(f"  Original: {debug_info['original_text'][:100]}...")
-                    logger.info(f"  Masked:   {debug_info['masked_text'][:100]}...")
-            
-            # Decode the masked tokens
+                    logger.info(f"Debug sample {i}: {dbg['masking_summary']}")
+                    logger.info(f"  Original: {dbg['original_text'][:100]}...")
+                    logger.info(f"  Masked:   {dbg['masked_text'][:100]}...")
+
+            # Decode e scrittura su colonna dedicata
             masked_text = self.tokenizer.decode(
                 masked_input_ids[0],
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=True
             )
-            
-            # Create new sample with masked text
+
             new_sample = dict(sample)
-            new_sample[text_columns[0]] = masked_text
-            
+            new_sample[masked_text_column] = masked_text
             masked_data.append(new_sample)
-        
-        # Save debug visualizations if requested
+
+        # 4) Visualizzazioni debug
         if save_debug_visualizations and self.debug_samples and output_dir:
             self.save_debug_visualizations(
                 output_dir=output_dir,
@@ -809,13 +812,31 @@ class MaskingService:
                 threshold_multiplier=threshold_multiplier,
                 top_k=top_k
             )
-        
-        # Create new dataset
+
+        # 5) Costruzione dataset
         masked_dataset = Dataset.from_list(masked_data)
-        
+
+        # 6) Sottocampionamento opzionale del dataset finale
+        if max_samples is not None and max_samples < len(masked_dataset):
+            if sample_strategy == "first":
+                keep_idx = list(range(max_samples))
+            elif sample_strategy == "even":
+                # indici equidistanti deterministici
+                step = len(masked_dataset) / max_samples
+                keep_idx = [int(round(k * step)) for k in range(max_samples)]
+                keep_idx = [min(i, len(masked_dataset)-1) for i in keep_idx]
+            elif sample_strategy == "random":
+                rng = np.random.default_rng(sample_seed)
+                keep_idx = rng.choice(len(masked_dataset), size=max_samples, replace=False)
+                keep_idx = keep_idx.tolist()
+            else:
+                raise ValueError(f"Unknown sample_strategy: {sample_strategy}")
+
+            masked_dataset = masked_dataset.select(keep_idx)
+
         logger.info(f"Created masked dataset with {len(masked_dataset)} samples")
         if self.debug_samples:
-            avg_masking = np.mean([s["statistics"]["masking_percentage"] for s in self.debug_samples])
+            avg_masking = float(np.mean([s["statistics"]["masking_percentage"] for s in self.debug_samples]))
             logger.info(f"Average masking percentage from debug samples: {avg_masking:.2f}%")
-        
-        return masked_dataset 
+
+        return masked_dataset

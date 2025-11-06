@@ -322,14 +322,31 @@ class TrainingRunner:
             # Create data loader for masked dataset
             processed_masked = self.dataset_service._process_dataset(
                 masked_dataset,
-                text_field=self.config.train_dataset.text_field,  # Let it auto-detect
+                text_field="text_masked",
                 label_field=self.config.train_dataset.label_field,
+                max_samples=self.config.masktune.max_samples
             )
             self.logger.info(f"Masktune applied. Masking stats: {masking_stats}, overriding train loader.")
             self.train_loader = torch.utils.data.DataLoader(
                 processed_masked,
                 batch_size=self.config.train_dataset.batch_size,
-                shuffle=True
+                shuffle=True,
+            )
+            
+        num_training_steps = len(self.train_loader) * self.config.epochs
+        if self.config.warmup_ratio == -1:
+            self.logger.warning("Disabled scheduler and warmup, costant learning rate mode")
+            self.lr_scheduler = get_scheduler(
+                "constant",
+                optimizer=self.optimizer,
+            )
+        else:
+            num_warmup_steps = int(self.config.warmup_ratio * num_training_steps)
+            self.lr_scheduler = get_scheduler(
+                "linear",
+                optimizer=self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
             )
         
         # Setup self-debiasing

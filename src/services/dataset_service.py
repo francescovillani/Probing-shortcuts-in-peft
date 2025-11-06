@@ -18,7 +18,7 @@ from pathlib import Path
 import os
 import sys
 import hashlib
-
+import numpy as np
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 from config import DatasetConfig
@@ -1013,26 +1013,26 @@ class DatasetService:
             loader = self._get_custom_loader(dataset._custom_loader_type)
         else:
             loader = self.hf_loader
-
         # Decoder models: usa prompted_text se presente
         actual_text_field = text_field
         if "prompted_text" in dataset.column_names:
             actual_text_field = "prompted_text"
             logger.info("Using prompted_text field for tokenization in decoder model")
-
-        # Tokenize
         dataset = dataset.map(
             lambda batch: loader.tokenize(batch, actual_text_field),
             batched=True,
             load_from_cache_file=False
         )
 
+        # Rinomina label -> labels se necessario (senza perdere la colonna)
         if label_field in dataset.column_names and label_field != "labels" and "labels" not in dataset.column_names:
             dataset = dataset.rename_column(label_field, "labels")
 
+        # Ripristina l'attributo personalizzato (va riattaccato dopo select/map)
         if trigger_config is not None:
             dataset.trigger_config = trigger_config
 
+        # MNLI: mappa string -> int se serve
         if "labels" in dataset.column_names and isinstance(dataset["labels"][0], str):
             label_map = {"entailment": 0, "neutral": 1, "contradiction": 2}
             dataset = dataset.map(lambda example: {"labels": label_map[example["labels"]]})
@@ -1042,7 +1042,6 @@ class DatasetService:
             for c in keep_columns:
                 if c in dataset.column_names and c not in cols:
                     cols.append(c)
-
         dataset.set_format("torch", columns=cols)
         return dataset
 
