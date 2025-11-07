@@ -12,7 +12,7 @@ import time
 import json
 from typing import Dict, Optional, List, Any
 from pathlib import Path
-
+import torch.nn.functional as F
 from tqdm import tqdm
 
 # Import opacus for differential privacy
@@ -24,7 +24,7 @@ except ImportError:
     PrivacyEngine = None
 
 from config import load_config, TrainingConfig
-from services import DatasetService, ModelService, EvaluationService, TrainingService, MaskTuneService, AFRService
+from services import DatasetService, ModelService, EvaluationService, TrainingService, MaskTuneService, SelfDebiasService
 from utils import setup_logging, set_all_seeds, create_experiment_directory
 
 
@@ -147,9 +147,15 @@ class TrainingRunner:
         if not self.is_evaluation_only:
             self.training_service = TrainingService(device=self.device)
         
-        self.afr_enabled = self.config.afr and self.config.afr.enabled
-        if self.afr_enabled:
-            self.afr_service = AFRService(config=self.config, device=self.device)
+
+        self.selfdebias_enabled = (self.config.selfdebias and 
+                                    self.config.selfdebias.enabled and
+                                    not self.is_evaluation_only)
+        if self.selfdebias_enabled:
+            self.selfdebias_service = SelfDebiasService(config=self.config, device=self.device)
+            self.logger.info("Self-debiasing enabled")
+        else:
+            self.selfdebias_service = None
 
         self.masktune = hasattr(self.config, 'masktune') and self.config.masktune and getattr(self.config.masktune, 'enabled', False)
             
@@ -178,41 +184,23 @@ class TrainingRunner:
         )
         
         # Prepare datasets
-        afr_debug_samples = {}
         debug_samples = {}
-        if self.afr_enabled:
-            # AFR has its own data splitting logic
-            self.train_loader, self.drw_loader, afr_debug_samples, self.raw_drw_dataset = self.dataset_service.prepare_afr_datasets(
-                train_config=self.config.train_dataset,
-                max_train_size=self.config.max_train_size,
-                afr_config=self.config.afr,
-                label_field=self.config.train_dataset.label_field
-            )
-            # For AFR, validation loaders are prepared separately
-            _, self.val_loaders, debug_samples, _ = self.dataset_service.prepare_datasets(
-                val_configs=self.config.validation_datasets,
-                extract_debug_samples=self.config.extract_debug_samples,
-                num_debug_samples=self.config.num_debug_samples,
-            )
-            # For AFR, validation loaders are prepared separately
-            _, self.afr_hpo_loaders, _, _ = self.dataset_service.prepare_datasets(
-                val_configs=self.config.afr.hpo_datasets,
-                extract_debug_samples=False,
-            )
-        else:
-            # Standard dataset preparation
-            self.train_loader, self.val_loaders, debug_samples, raw_train_dataset = self.dataset_service.prepare_datasets(
-                train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
-                val_configs=self.config.validation_datasets,
-                max_train_size=self.config.max_train_size,
-                extract_debug_samples=self.config.extract_debug_samples,
-                num_debug_samples=self.config.num_debug_samples,
-                return_raw_datasets= self.masktune  # Return raw dataset if masktune is enabled
-            )
+
+
+        
+        # Standard dataset preparation 
+        self.train_loader, self.val_loaders, debug_samples, self.raw_train_dataset = self.dataset_service.prepare_datasets(
+            train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
+            val_configs=self.config.validation_datasets,
+            max_train_size=self.config.max_train_size,
+            extract_debug_samples=self.config.extract_debug_samples,
+            num_debug_samples=self.config.num_debug_samples,
+            return_raw_datasets= True  # Return raw dataset if masktune is enabled
+        )
         
         # Initialize tracker with debug samples
         
-        self.tracker = ExperimentTracker(self.output_dir, self.config, {**debug_samples, **afr_debug_samples})
+        self.tracker = ExperimentTracker(self.output_dir, self.config, {**debug_samples})
         
         # Log poisoning configuration if enabled
         if self.config.train_dataset and self.config.train_dataset.poisoning and self.config.train_dataset.poisoning.enabled:
@@ -244,17 +232,6 @@ class TrainingRunner:
             config=self.config.model,
             num_labels=self.config.num_labels
         )
-        
-        # Configure model to use the pad token (important for generative models)
-        if hasattr(self.model.config, 'pad_token_id') and self.model.config.pad_token_id is None:
-            self.model.config.pad_token_id = self.tokenizer.pad_token_id
-            self.logger.info(f"Set model pad_token_id to {self.tokenizer.pad_token_id}")
-        
-        # For PEFT models, we might need to set it on the base model too
-        if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'config'):
-            if hasattr(self.model.base_model.config, 'pad_token_id') and self.model.base_model.config.pad_token_id is None:
-                self.model.base_model.config.pad_token_id = self.tokenizer.pad_token_id
-                self.logger.info(f"Set base model pad_token_id to {self.tokenizer.pad_token_id}")
         
         # Skip optimization setup for evaluation-only mode
         if self.is_evaluation_only:
@@ -315,23 +292,29 @@ class TrainingRunner:
         elif (self.config.differential_privacy and 
               self.config.differential_privacy.enabled and 
               not OPACUS_AVAILABLE):
-            self.logger.warning("Differential privacy requested but Opacus is not available. Install opacus>=1.4.0 to enable this feature.")
+            self.logger.warning("Differential privacy requested but Opacus is not available.")
         
         num_training_steps = len(self.train_loader) * self.config.epochs
         num_warmup_steps = int(self.config.warmup_ratio * num_training_steps)
-        self.lr_scheduler = get_scheduler(
-            "linear",
-            optimizer=self.optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
+        if self.config.warmup_ratio == -1:
+            self.lr_scheduler = get_scheduler(
+                "constant",
+                optimizer=self.optimizer
+            )
+        else:
+            self.lr_scheduler = get_scheduler(
+                "linear",
+                optimizer=self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
         
         # Add masktune service
         if self.masktune:
             self.masktune_service = MaskTuneService(
                 config=self.config,
                 output_dir=self.output_dir,
-                train_dataset=raw_train_dataset,
+                train_dataset=self.raw_train_dataset,
                 base_model=self.model,
                 device=self.device
             )
@@ -349,6 +332,124 @@ class TrainingRunner:
                 shuffle=True
             )
         
+        # Setup self-debiasing
+        if self.selfdebias_enabled:
+            self._setup_selfdebiasing(num_training_steps)
+    
+    def _setup_selfdebiasing(self, total_steps: int):
+        # """Setup self-debiasing by loading shallow model and computing bias scores."""
+        self.logger.info("Setting up self-debiasing...")
+        shallow_model = None
+        if self.config.reweighting_model:
+            self.logger.info("Loading shallow model from reweighting_model config")
+            shallow_model = self.model_service.create_model(
+                config=self.config.reweighting_model,
+                num_labels=self.config.num_labels
+            )
+        else:
+            self.logger.warning("No reweighting_model specified in config. Cannot compute bias scores.")
+            return
+        
+        # Dataset service
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config.reweighting_model.base_model,
+            use_fast=False
+        )
+        tokenizer.model_max_length = self.config.tokenizer_max_length
+        dataset_service = DatasetService(
+            tokenizer=tokenizer,
+            max_length=self.config.tokenizer_max_length,
+            seed=self.config.seed
+        )
+        train_loader, val_loaders, debug_samples_shallow, raw_train_dataset_shallow = dataset_service.prepare_datasets(
+            train_config=self.config.train_dataset,  # Will be None for evaluation-only mode
+            val_configs=self.config.validation_datasets,
+            max_train_size=self.config.max_train_size,
+            extract_debug_samples=self.config.extract_debug_samples,
+            num_debug_samples=self.config.num_debug_samples,
+            return_raw_datasets= False  # Return raw dataset if masktune is enabled
+        )
+        
+        # Compute bias scores for all training examples
+        bias_probs_full, train_labels = self.selfdebias_service.get_full_probability_distributions(
+            shallow_model=shallow_model,
+            dataset=train_loader.dataset,
+            num_labels=self.config.num_labels,
+            device=self.device,
+            batch_size=self.config.train_dataset.batch_size,
+            num_workers=getattr(self.config, 'num_workers', 0),
+            collate_fn=getattr(self.train_loader, 'collate_fn', None)
+        )
+        
+        # Store these for use during training
+        self.bias_probs_full = bias_probs_full
+        self.train_labels_all = train_labels
+        
+        # Update train loader to provide indices for bias scores
+        self.train_loader_with_indices = self._create_indexed_dataloader()
+        
+        self.logger.info(f"Computed bias scores for {len(bias_probs_full)} training examples")
+        self.logger.info(f"Total training steps for annealing: {total_steps}")
+        
+        # Validate shallow model on first validation dataset if available
+        if val_loaders:
+            first_val_name = next(iter(val_loaders.keys()))
+            first_val_loader = val_loaders[first_val_name]
+            self.logger.info(f"Validating shallow model on {first_val_name} dataset")
+            shallow_results = self.evaluation_service.validate_shallow_model(
+                shallow_model=shallow_model,
+                dataloader=first_val_loader,
+                desc=f"Validating Shallow Model on {first_val_name}"
+            )
+            self.logger.info(f"Shallow model validation results: {shallow_results}")
+        
+    def _create_indexed_dataloader(self):
+        from torch.utils.data import Dataset, DataLoader, Subset
+        import torch
+
+        class IndexedDataset(Dataset):
+            def __init__(self, base_dataset):
+                self.ds = base_dataset
+
+            def __len__(self):
+                return len(self.ds)
+
+            def _resolve_orig_index(self, i):
+                # mappa i (indice nel dataset corrente) all’indice dell’ORIGINALE
+                orig = i
+                d = self.ds
+                while isinstance(d, Subset):
+                    orig = d.indices[orig]
+                    d = d.dataset
+                return orig
+
+            def __getitem__(self, i):
+                item = self.ds[i]
+                orig = self._resolve_orig_index(i)
+
+                # uniforma l’output a dict senza modificare l’oggetto originale
+                if isinstance(item, dict):
+                    out = {**item}
+                else:
+                    # supponiamo (x, y) o (x, y, ...)
+                    x, y = item[:2]
+                    out = {'input': x, 'labels': y}
+
+                out['index'] = i          # indice nel dataset corrente (Subset)
+                out['orig_index'] = orig  # indice nel dataset base (ALLINEA bias_probs_full)
+                return out
+
+        indexed_dataset = IndexedDataset(self.train_loader.dataset)
+        return DataLoader(
+            indexed_dataset,
+            batch_size=self.config.train_dataset.batch_size,
+            shuffle=True,  # ok; hai comunque orig_index per allineare
+            num_workers=getattr(self.config, 'num_workers', 0),
+            pin_memory=getattr(self.config, 'pin_memory', False),
+            drop_last=getattr(self.config, 'drop_last', False),
+            collate_fn=getattr(self.train_loader, 'collate_fn', None),
+        )
+            
     def save_checkpoint(self, epoch: int):
         """Save model checkpoint"""
         checkpoint_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch}"
@@ -356,17 +457,50 @@ class TrainingRunner:
         
     def train_epoch(self, epoch: int):
         """Run one training epoch"""
-        return self.training_service.train_epoch(
-            model=self.model,
-            dataloader=self.train_loader,
-            optimizer=self.optimizer,
-            lr_scheduler=self.lr_scheduler,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            epoch_num=epoch,
-            privacy_engine=self.privacy_engine,
-            # physical_batch_size=self.config.train_dataset.batch_size,
-            # logical_batch_size=self.config.train_dataset.logical_batch_size if (self.config.train_dataset and self.config.train_dataset.logical_batch_size) else self.config.train_dataset.batch_size,
-        )
+        if self.selfdebias_enabled and hasattr(self, 'bias_probs_full'):
+            # Use custom training with reweighting for self-debiasing
+            total_steps = len(self.train_loader) * self.config.epochs
+            current_step = epoch * len(self.train_loader)
+            
+            # Use indices from the dataset to access bias probabilities
+            def custom_loss_fn(logits, labels, indices, current_step, total_steps, **kwargs):
+                # Get bias probabilities using the actual indices from the batch
+                bias_probs_batch = self.bias_probs_full[indices].to(self.device)
+
+                loss, metadata = self.selfdebias_service.compute_reweighted_loss_with_full_probs(
+                    logits=logits,
+                    labels=labels,
+                    bias_probs_full=bias_probs_batch,
+                    current_step=current_step,
+                    total_steps=total_steps
+                )
+                return loss, metadata
+            
+            # Use the train_epoch_with_reweighting method with the indexed dataloader
+            return self.training_service.train_epoch_with_reweighting(
+                model=self.model,
+                dataloader=self.train_loader_with_indices,  # Use the indexed dataloader
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                epoch_num=epoch,
+                current_step=current_step,
+                total_steps=total_steps,
+                custom_loss_fn=custom_loss_fn,
+                custom_loss_kwargs={'batch_start_idx': 0},
+                privacy_engine=self.privacy_engine
+            )
+        else:
+            # Standard training
+            return self.training_service.train_epoch(
+                model=self.model,
+                dataloader=self.train_loader,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                epoch_num=epoch,
+                privacy_engine=self.privacy_engine,
+            )
     
     def run_training(self):
         """Run the complete training process or evaluation-only process"""
@@ -429,112 +563,6 @@ class TrainingRunner:
             )
             
         self.tracker.save_results()
-        # ===== Stage-2 (AFR) =====
-        if self.afr_enabled:
-            from copy import deepcopy
-            self.logger.info("Starting AFR Stage 2 (WCA-driven)...")
-            selected_val_loader = self.afr_hpo_loaders
-
-            # --- 1) Param grid (se non fornita, default ragionevoli) ---
-            if hasattr(self.config.afr, "param_grid") and self.config.afr.param_grid:
-                param_grid = dict(self.config.afr.param_grid)
-            else:
-                # Default "safe": ampliare/ridurre a seconda del task
-                param_grid = {
-                "gamma":     [10, 100, 1000],
-                "lambda_l2": [0, 1.0, 10.0],
-                "lr":        [1e-2],
-                "epochs":    [self.config.afr.epochs],
-                "patience":  [self.config.afr.patience]#[self.config.afr.patience],
-                }
-
-            run_grid = bool(getattr(self.config.afr, "grid_search", True))
-
-            # --- 2) Head snapshot pulito (per isolare i tentativi) ---
-            head = getattr(self.model, "classifier", None)
-            if head is None:
-                raise RuntimeError("AFR: classifier head non trovata sul modello.")
-            head_init_state = deepcopy(head.state_dict())
-
-            # --- 3) Grid search su WCA (se abilitata) ---
-            best_combo = None
-            grid_results = []
-            val_max_batches = 50
-            if run_grid:
-                self.logger.info(f"[AFR Grid] param_grid = {param_grid}")
-                grid_results = self.afr_service.grid_search(
-                    model=self.model,
-                    drw_loader=self.drw_loader,
-                    drw_dataset_raw=self.raw_drw_dataset,
-                    param_grid=param_grid,
-                    pooling="cls",
-                    cache_dtype="fp32",
-                    val_loaders=selected_val_loader,      # o solo il primo loader
-                    eval_every=5,
-                    val_max_batches=val_max_batches,
-                )
-
-                if not grid_results:
-                    self.logger.warning("[AFR Grid] Nessun risultato dalla grid; userò il primo set di default.")
-                    best_combo = {k: v[0] if isinstance(v, list) else v for k, v in param_grid.items()}
-                else:
-                    # ordinati in grid_search: (-WCA, -MCA)
-                    top_k = min(5, len(grid_results))
-                    for r in grid_results[:top_k]:
-                        self.logger.info(f"[AFR Grid][TOP] {r}")
-                    best_combo = grid_results[0]
-
-            else:
-                # niente grid: prendi direttamente i valori (o i default)
-                best_combo = {
-                    "gamma":     param_grid["gamma"][0],
-                    "lambda_l2": param_grid["lambda_l2"][0],
-                    "lr":        param_grid["lr"][0],
-                    "epochs":    param_grid["epochs"][0],
-                    "patience":  param_grid["patience"][0],
-                }
-                self.logger.info(f"[AFR] Grid disabilitata. Uso fixed params: {best_combo}")
-
-            # --- 4) Retrain finale con i migliori iperparametri ---
-            # ripristina head pulita prima del run finale
-            head.load_state_dict(head_init_state)
-
-            with self.afr_service._patch_afr_config(**{
-                k: best_combo[k] for k in ("gamma", "lambda_l2", "lr", "epochs", "patience") if k in best_combo
-            }):
-                self.logger.info(f"[AFR Final] Parametri scelti: "
-                                f"gamma={self.afr_service.afr_config.gamma}, "
-                                f"lambda_l2={self.afr_service.afr_config.lambda_l2}, "
-                                f"lr={self.afr_service.afr_config.lr}, "
-                                f"epochs={self.afr_service.afr_config.epochs}, "
-                                f"patience={self.afr_service.afr_config.patience}")
-
-                # train_drw ora fa early stopping su WCA se val_loaders è passato
-                self.afr_service.train_drw(
-                    model=self.model,
-                    drw_loader=self.drw_loader,
-                    drw_dataset_raw=self.raw_drw_dataset,
-                    pooling="cls",
-                    cache_dtype="fp32",
-                    val_loaders=selected_val_loader,           # Dict[str, DataLoader]
-                )
-
-            # --- 5) Valutazione finale post-AFR su tutti i val loader ---
-            afr_val_results = self.run_validation(prefix="afr_val")
-
-            afr_dir = self.output_dir / "results"
-            afr_dir.mkdir(parents=True, exist_ok=True)
-
-            (afr_dir / "afr_evaluation_results.json").write_text(
-                json.dumps(afr_val_results, indent=2)
-            )
-            (afr_dir / "afr_best_params.json").write_text(
-                json.dumps(best_combo, indent=2)
-            )
-            if grid_results:
-                (afr_dir / "afr_grid_results.json").write_text(
-                    json.dumps(grid_results, indent=2)
-                )
 
         if wandb.run:
             wandb.finish()

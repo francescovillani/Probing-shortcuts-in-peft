@@ -19,7 +19,7 @@ from .evaluation_service import EvaluationService
 from .masking_service import MaskingService
 from .masktune_service import MaskTuneService
 from .training_service import TrainingService
-from .afr_service import AFRService
+from .self_debias_service import SelfDebiasService
 
 __all__ = [
     'DatasetService',
@@ -30,5 +30,5 @@ __all__ = [
     'MaskingService',
     'MaskTuneService',
     'TrainingService',
-    'AFRService',
+    'SelfDebiasService',
 ] 

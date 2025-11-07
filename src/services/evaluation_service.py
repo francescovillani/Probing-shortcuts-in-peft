@@ -756,3 +756,109 @@ class EvaluationService:
             results["predictions"] = all_predictions
 
         return results 
+    
+    
+    def validate_shallow_model(
+        self,
+        shallow_model,
+        dataloader,
+        num_bins: int = 10,
+        desc: str = "Validating Shallow Model (f_b)"
+    ) -> Dict[str, Any]:
+        """
+        Runs a special evaluation on the shallow model (f_b) to check its
+        confidence distribution for the self-debiasing framework.
+        
+        This generates the data for a histogram like Figure 3 in the paper.
+        
+        Args:
+            shallow_model: The f_b model to validate
+            dataloader: The dataloader (e.g., full training set or a dev set)
+            num_bins: Number of bins for the histogram
+            
+        Returns:
+            A results dictionary containing histogram data and accuracy.
+        """
+        shallow_model.eval()
+        model_device = self._get_model_device(shallow_model)
+        
+        all_probs = []
+        all_labels = []
+
+        logger.info(f"Running shallow model validation for {desc}...")
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc=desc):
+                batch = self._move_batch_to_device(batch, model_device)
+                labels = batch["labels"]
+                
+                # Get logits
+                # Create a copy of the batch without labels for the model
+                model_inputs = {k: v for k, v in batch.items() if k != "labels"}
+                
+                outputs = shallow_model(**model_inputs)
+                logits = outputs.logits
+                
+                # Get probabilities
+                probs = F.softmax(logits, dim=-1)
+                
+                all_probs.append(probs.cpu())
+                all_labels.append(labels.cpu())
+
+        all_probs = torch.cat(all_probs, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        
+        # --- Start Histogram Computation ---
+        
+        # Get confidence and predictions
+        confidences, predictions = torch.max(all_probs, dim=-1)
+        
+        # Get a boolean mask of correct predictions
+        correct_mask = (predictions == all_labels)
+        
+        # Get confidences for correct and incorrect predictions
+        correct_confidences = confidences[correct_mask]
+        
+        # Define bins
+        bin_range = (0.0, 1.0)
+        
+        import numpy as np
+        
+        counts_all, bin_edges = np.histogram(
+            confidences.numpy(), bins=num_bins, range=bin_range
+        )
+        counts_correct, _ = np.histogram(
+            correct_confidences.numpy(), bins=num_bins, range=bin_range
+        )
+        
+        accuracy = correct_mask.float().mean().item()
+
+        logger.info(f"Shallow Model Validation: Accuracy = {accuracy:.4f}")
+        logger.info(f"Shallow Model Validation: Confidence histogram (all preds, 10 bins): {counts_all.tolist()}")
+        logger.info(f"Shallow Model Validation: Confidence histogram (correct preds, 10 bins): {counts_correct.tolist()}")
+
+        # This is the dictionary you can return and log to wandb
+        total_preds = counts_all.sum()
+        total_correct = counts_correct.sum()
+
+        # Percentage of predictions in the highest-confidence (last) bin
+        overconf = float(counts_all[-1] / total_preds * 100) if total_preds > 0 else 0.0
+        # Same metric but restricted to correct predictions (useful to inspect calibration)
+        overconf_correct = float(counts_correct[-1] / total_correct * 100) if total_correct > 0 else 0.0
+
+        results = {
+            "shallow_model_accuracy": accuracy,
+            "shallow_model_confidence_histogram": {
+            "all_predictions": {
+                "counts": counts_all.tolist(),
+                "bin_edges": bin_edges.tolist(),
+                "overconf_percent": overconf
+            },
+            "correct_predictions": {
+                "counts": counts_correct.tolist(),
+                "bin_edges": bin_edges.tolist(),
+                "overconf_percent": overconf_correct
+            }
+            }
+        }
+        
+        return results

@@ -22,7 +22,7 @@ class PromptConfig(BaseModel):
 class PEFTConfig(BaseModel):
     """PEFT configuration settings"""
     peft_type: str = Field("none", description="Type of PEFT to use")
-    peft_args: Dict[str, Any] = Field(default_factory=dict, description="PEFT-specific arguments")
+    peft_args: Optional[Dict[str, Any]] = Field(None, description="PEFT-specific arguments")
 
     @field_validator("peft_type")
     @classmethod
@@ -230,10 +230,36 @@ class AFRConfig(BaseModel):
     hpo_datasets: Dict[str, DatasetConfig] = Field(..., description="Validation/evaluation datasets")
     hpo_is_hans_index : Optional[int] = Field(None, description="Index of HANS dataset in hpo_datasets if present (for special handling)")
 
+
+class SelfDebiasConfig(BaseModel):
+    """Configuration for Self-Debiasing to mitigate unknown biases"""
+    enabled: bool = Field(False, description="Whether to enable self-debiasing")
+    
+    # Shallow model training configuration
+    shallow_model_training: bool = Field(False, description="Whether to train a new shallow model (if false, use reweighting_model from config)")
+    shallow_subset_size: int = Field(2000, ge=100, description="Number of examples to use for training shallow model")
+    shallow_model_epochs: int = Field(3, ge=1, description="Number of epochs to train shallow model on small subset")
+    shallow_model_lr: Optional[float] = Field(None, description="Learning rate for shallow model (uses main model LR if None)")
+    
+    # Annealing configuration
+    annealing_min: float = Field(0.8, ge=0.0, le=1.0, description="Minimum value for annealing schedule (a in paper)")
+    
+    # Caching
+    cache_bias_scores: bool = Field(True, description="Cache bias scores to disk for reuse")
+    
+    @field_validator("shallow_subset_size")
+    @classmethod
+    def validate_subset_size(cls, v, info):
+        if v < 100:
+            raise ValueError("shallow_subset_size must be at least 100")
+        return v
+
+
 class TrainingConfig(BaseModel):
     """Main training/evaluation configuration"""
     # Model Configuration
     model: ModelConfig = Field(..., description="Model configuration")
+    reweighting_model: Optional[ModelConfig] = Field(None, description="Reweighting model configuration (for selfdebias)")
     num_labels: int = Field(..., description="Number of output labels")
     
     # Training Configuration (optional for evaluation-only mode)
@@ -253,6 +279,9 @@ class TrainingConfig(BaseModel):
 
     # AFR Configuration
     afr: Optional[AFRConfig] = Field(default=None, description="Automatic Feature Reweighting (AFR) configuration")
+    
+    # Self-Debiasing Configuration
+    selfdebias: Optional[SelfDebiasConfig] = Field(default=None, description="Self-debiasing configuration for unknown bias mitigation")
 
     # Differential Privacy Configuration
     differential_privacy: Optional[DifferentialPrivacyConfig] = Field(default=None, description="Differential privacy configuration using Opacus")
@@ -327,12 +356,12 @@ class TrainingConfig(BaseModel):
             raise ValueError("Number of labels must be greater than 0")
         return v
 
-    @field_validator("warmup_ratio")
-    @classmethod
-    def validate_warmup_ratio(cls, v):
-        if not 0 <= v <= 1:
-            raise ValueError("Warmup ratio must be between 0 and 1")
-        return v
+    # @field_validator("warmup_ratio")
+    # @classmethod
+    # def validate_warmup_ratio(cls, v):
+    #     if not 0 <= v <= 1:
+    #         raise ValueError("Warmup ratio must be between 0 and 1")
+    #     return v
 
     @field_validator("gradient_accumulation_steps")
     @classmethod

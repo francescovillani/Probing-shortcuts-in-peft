@@ -9,6 +9,8 @@ import random
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Union, Tuple, Type, Any
+import torch
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from datasets import DatasetDict, load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer, PreTrainedModel
@@ -19,7 +21,7 @@ import hashlib
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
-from config import DatasetConfig, AFRConfig
+from config import DatasetConfig
 from loaders.base_loader import BaseDatasetLoader
 from services.prompt_templates import PromptTemplateService
 
@@ -817,10 +819,13 @@ class DatasetService:
             train_dataset = self._process_dataset(train_dataset, text_field, label_field)
             
             # Create training dataloader
+            generator = torch.Generator()
+            generator.manual_seed(self.seed)
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=train_config.logical_batch_size if train_config.logical_batch_size else train_config.batch_size,
-                shuffle=True
+                shuffle=True,
+                generator=generator,
             )
             logger.info(f"Created training dataloader with batch size {train_config.batch_size}")
 
@@ -890,92 +895,6 @@ class DatasetService:
             return batch_dict
         return _collate
 
-    def prepare_afr_datasets(
-        self,
-        train_config: DatasetConfig,
-        afr_config: AFRConfig,
-        max_train_size: Optional[int] = None,
-        extract_debug_samples: bool = True,
-        num_debug_samples: int = 5,
-        label_field: str = "label"
-    ) -> Tuple[DataLoader, DataLoader, Dict[str, List[Dict[str, Any]]], Dataset]:
-        logger.info("Preparing datasets for AFR two-stage training")
-        
-        debug_samples = {}
-        full_train_dataset = self.load_dataset(train_config)
-    
-        text_field = train_config.text_field
-        label_field = train_config.label_field
-
-        # Handle training set size limitation BEFORE poisoning
-        if max_train_size:
-            full_train_dataset = full_train_dataset.shuffle(seed=self.seed)
-            full_train_dataset = full_train_dataset.select(range(min(max_train_size, len(full_train_dataset))))
-            logger.info(f"Limited training dataset to {len(full_train_dataset)} examples BEFORE poisoning")
-
-        # Apply poisoning if configured
-        if train_config.poisoning and train_config.poisoning.enabled:
-            logger.info("Applying poisoning to training dataset")
-            poison_params = train_config.poisoning.model_dump(exclude={'enabled'})
-            full_train_dataset = self.apply_poisoning(
-                dataset=full_train_dataset,
-                prompt_config=train_config,  # Pass prompt config for length calculations
-                **poison_params
-            )
-            
-
-        # Aggiungi indice stabile
-        # full_train_dataset = full_train_dataset.add_column("idx", list(range(len(full_train_dataset))))
-        
-        derm_dataset, _, drw_dataset = self.apply_splitting(
-            dataset=full_train_dataset,
-            train_size=afr_config.data_split_ratio,
-            test_size=1.0 - afr_config.data_split_ratio,
-            val_size = 0,
-            split_seed=self.seed,
-            stratify_by=label_field
-        )
-        
-        if extract_debug_samples:
-            debug_samples["erm"] = self.extract_debug_samples(derm_dataset, "erm_dataset", num_debug_samples, text_field)
-            debug_samples["afr"] = self.extract_debug_samples(drw_dataset, "afr_dataset", num_debug_samples, text_field)
-            
-        
-        logger.info(f"AFR Stage 1 (DERM) dataset size: {len(derm_dataset)}")
-        logger.info(f"AFR Stage 2 (DRW) dataset size: {len(drw_dataset)}")
-        
-        # Facoltativo: raw_drw per debug/analisi
-        # raw_drw_dataset = drw_dataset.select(range(len(drw_dataset)))
-        
-        processed_derm_dataset = self._process_dataset(
-            derm_dataset,
-            text_field=train_config.text_field,
-            label_field=label_field,
-            keep_columns=["idx"],                      # <--- preserva idx
-        )
-        processed_drw_dataset = self._process_dataset(
-            drw_dataset,
-            text_field=train_config.text_field,
-            label_field=label_field,
-            keep_columns=["idx"],                      # <--- preserva idx
-        )
-        
-        derm_loader = DataLoader(
-            processed_derm_dataset,
-            batch_size=train_config.batch_size,
-            shuffle=True,
-            collate_fn=self.build_collate_fn(include_idx=False),   # <-- niente indici durante training ERM
-        )
-
-        drw_pred_loader = DataLoader(
-            processed_drw_dataset,
-            batch_size=train_config.batch_size,
-            shuffle=False,
-            collate_fn=self.build_collate_fn(include_idx=True),    # <-- indici come "indices" per AFR/cache
-        )
-        
-        # NB: per il training DRW userai di nuovo processed_drw_dataset ma con shuffle=True in AFRService
-        return derm_loader, drw_pred_loader, debug_samples, processed_drw_dataset
 
     def _load_dataset(self, config: Dict) -> Dataset:
         """Helper to load a dataset from a config dictionary."""
@@ -1060,57 +979,70 @@ class DatasetService:
         dataset: Dataset, 
         text_field: Union[str, List[str]],
         label_field: str,
-        keep_columns: Optional[List[str]] = None,   # <--- NEW
+        keep_columns: Optional[List[str]] = None,
+        max_samples: Optional[int] = None,
+        sample_strategy: str = "random",  # "first" | "even" | "random"
+        sample_seed: int = 42,
     ) -> Dataset:
         """Process dataset with tokenization and formatting."""
-        # Get the appropriate loader for tokenization
         if isinstance(dataset, DatasetDict):
             dataset = next(iter(dataset.values()))
         
-        # Preserve trigger config if it exists
         trigger_config = getattr(dataset, 'trigger_config', None)
-        
-        # Determine which loader to use for tokenization
+
+        if max_samples is not None and max_samples < len(dataset):
+            if sample_strategy == "first":
+                indexes = list(range(max_samples))
+            elif sample_strategy == "even":
+                step = len(dataset) / max_samples
+                indexes = [min(int(round(k * step)), len(dataset) - 1) for k in range(max_samples)]
+                # dedup e padding se servisse
+                indexes = sorted(set(indexes))
+                if len(indexes) < max_samples:
+                    # completa con indici mancanti in coda
+                    indexes += [i for i in range(len(dataset)) if i not in indexes][:max_samples - len(indexes)]
+            elif sample_strategy == "random":
+                rng = np.random.default_rng(sample_seed)
+                indexes = rng.choice(len(dataset), size=max_samples, replace=False).tolist()
+            else:
+                raise ValueError(f"Unknown sample_strategy: {sample_strategy}")
+            dataset = dataset.select(indexes)
+
+        # Scegli il loader per tokenizzazione
         if hasattr(dataset, '_custom_loader_type'):
             loader = self._get_custom_loader(dataset._custom_loader_type)
         else:
             loader = self.hf_loader
-        
-        # For decoder models with prompting, use prompted_text field if available
+
+        # Decoder models: usa prompted_text se presente
         actual_text_field = text_field
         if "prompted_text" in dataset.column_names:
             actual_text_field = "prompted_text"
             logger.info("Using prompted_text field for tokenization in decoder model")
-        
+
         # Tokenize
         dataset = dataset.map(
             lambda batch: loader.tokenize(batch, actual_text_field),
-            batched=True
+            batched=True,
+            load_from_cache_file=False
         )
-        
-        # Rename label field if needed (senza perdere la colonna "labels")
+
         if label_field in dataset.column_names and label_field != "labels" and "labels" not in dataset.column_names:
             dataset = dataset.rename_column(label_field, "labels")
-        
-        # Restore trigger config
+
         if trigger_config is not None:
             dataset.trigger_config = trigger_config
-            
-        # Convert string labels to numeric values for MNLI (senza rimuovere "labels")
+
         if "labels" in dataset.column_names and isinstance(dataset["labels"][0], str):
             label_map = {"entailment": 0, "neutral": 1, "contradiction": 2}
-            dataset = dataset.map(
-                lambda example: {"labels": label_map[example["labels"]]},
-                # NOTA: non rimuovere "labels", la stiamo sovrascrivendo
-            )
-        
-        # --- NEW: costruiamo la lista colonne per torch, includendo eventuali keep_columns presenti
+            dataset = dataset.map(lambda example: {"labels": label_map[example["labels"]]})
+
         cols = ["input_ids", "attention_mask", "labels"]
         if keep_columns:
             for c in keep_columns:
                 if c in dataset.column_names and c not in cols:
                     cols.append(c)
-        
+
         dataset.set_format("torch", columns=cols)
         return dataset
 

@@ -140,7 +140,9 @@ class MaskingService:
         text_columns: List[str],
         label_column: str = "label",
         batch_size: int = 32,
-        max_length: int = 512
+        max_length: int = 512,
+        cache_dir: Optional[Path] = "saliency_cache",
+        cache_name: str = "saliency_scores.pt"
     ) -> List[torch.Tensor]:
         """
         Compute saliency scores for an entire dataset in an efficient batched manner.
@@ -151,10 +153,27 @@ class MaskingService:
             label_column: Name of the label column
             batch_size: Batch size for processing
             max_length: Maximum sequence length
+            cache_dir: Directory to cache saliency scores
+            cache_name: Name of the cache file
             
         Returns:
             List of saliency score tensors, one per sample
         """
+        # Check if cached scores exist
+        # if cache_dir is not None:
+        #     cache_path = Path(cache_dir) / cache_name
+        #     if cache_path.exists():
+        #         logger.info(f"Loading cached saliency scores from {cache_path}")
+        #         try:
+        #             scores = torch.load(cache_path)
+        #             if len(scores) == len(dataset):  # Verify cache matches dataset size
+        #                 logger.info("Using cached saliency scores")
+        #                 return scores
+        #             else:
+        #                 logger.warning("Cache size mismatch - recomputing scores")
+        #         except Exception as e:
+        #             logger.warning(f"Failed to load cache: {e}. Computing scores from scratch.")
+
         logger.info(f"Computing saliency scores for {len(dataset)} samples")
         
         all_saliency_scores = []
@@ -203,6 +222,17 @@ class MaskingService:
             # Store individual saliency tensors
             for j in range(batch_saliency.size(0)):
                 all_saliency_scores.append(batch_saliency[j].cpu())
+        
+        # Cache the scores if cache_dir is provided
+        if cache_dir is not None:
+            cache_dir = Path(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / cache_name
+            logger.info(f"Caching saliency scores to {cache_path}")
+            try:
+                torch.save(all_saliency_scores, cache_path)
+            except Exception as e:
+                logger.warning(f"Failed to cache saliency scores: {e}")
         
         return all_saliency_scores
     

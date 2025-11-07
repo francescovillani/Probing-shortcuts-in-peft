@@ -67,6 +67,17 @@ class ModelService:
         # Log model information
         self._log_model_info(model)
         
+                # Configure model to use the pad token (important for generative models)
+        if hasattr(model.config, 'pad_token_id') and model.config.pad_token_id is None:
+            model.config.pad_token_id = self.tokenizer.pad_token_id
+            self.logger.info(f"Set model pad_token_id to {self.tokenizer.pad_token_id}")
+        
+        # For PEFT models, we might need to set it on the base model too
+        if hasattr(model, 'base_model') and hasattr(model.base_model, 'config'):
+            if hasattr(model.base_model.config, 'pad_token_id') and model.base_model.config.pad_token_id is None:
+                model.base_model.config.pad_token_id = self.tokenizer.pad_token_id
+                self.logger.info(f"Set base model pad_token_id to {self.tokenizer.pad_token_id}")
+        
         return model
     
     def load_checkpoint(
